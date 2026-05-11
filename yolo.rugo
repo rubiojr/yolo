@@ -748,27 +748,31 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
   id = ensure_vm(name)
 
   if !no_prov
-    # Resolve once so we know the actual marker name (Yolofile hashes content).
+    # Resolve once. marker is content-hashed so source edits trigger a re-run.
     resolved = resolve_provisioner(prov_name)
     pname = resolved.name
     if pname == ""
-      # No explicit provisioner, no Yolofile, no language signals — that's fine,
-      # just skip provisioning. The user can opt back in with --provisioner.
       log("no provisioner detected for #{os.cwd()} — skipping (use --provisioner NAME or add a Yolofile)")
     elsif resolved.src == ""
       err_("unknown provisioner '#{prov_name}'")
       release_lock(name)
       os.exit(1)
-    elsif !is_applied(name, id, pname)
+    elsif !is_applied(name, id, resolved.marker)
       apply_provisioner(name, id, prov_name)
-      mark_applied(name, id, pname)
+      mark_applied(name, id, resolved.marker)
     end
   end
 
-  # Optional: layer an AI agent on top. Tracked separately so it only
-  # installs once and survives re-provisions of the language layer.
+  # Optional: layer an AI agent on top. Tracked separately, also content-hashed.
   if agent_name != ""
-    agent_marker = "ai-agent:#{agent_name}"
+    agent_src = AI_AGENTS[agent_name]
+    if agent_src == nil
+      err_("unknown ai-agent '#{agent_name}'")
+      release_lock(name)
+      os.exit(1)
+    end
+    agent_short = str.slice(crypto.sha256(agent_src), 0, 12)
+    agent_marker = "ai-agent:#{agent_name}:#{agent_short}"
     if !is_applied(name, id, agent_marker)
       apply_agent(id, agent_name)
       mark_applied(name, id, agent_marker)
@@ -843,15 +847,6 @@ def has_yolofile
   return os.file_exists(yolofile_path())
 end
 
-# Marker name used for is_applied/mark_applied bookkeeping. The hash suffix
-# ensures the marker becomes stale automatically when the Yolofile changes.
-def yolofile_marker_name
-  content = os.read_file(yolofile_path())
-  hash = crypto.sha256(content)
-  short = str.slice(hash, 0, 12)
-  return "yolofile:#{short}"
-end
-
 # Best-effort: pick a built-in provisioner based on files in $PWD.
 # Returns the provisioner name (key into PROVISIONERS) or "" if no signal.
 def detect_provisioner
@@ -895,39 +890,61 @@ end
 #   - "" (default)    → Yolofile if present
 #                     → else auto-detect from $PWD
 #                     → else "" (skip provisioning)
+#
+# The returned `marker` is what we store in .applied and check against. It
+# includes a short content hash so edits to the source (Yolofile or rebuilt
+# embedded provisioner) invalidate the marker and trigger re-provisioning.
 def resolve_provisioner(prov_name)
   pname = prov_name
   if pname == ""
     if has_yolofile()
-      pname = yolofile_marker_name()
+      pname = "__yolofile__"
     else
       pname = detect_provisioner()
     end
   end
   if pname == ""
-    return {name: "", src: ""}
+    return {name: "", display: "", marker: "", src: ""}
   end
+
   src = ""
-  if str.starts_with(pname, "yolofile:")
+  display = pname
+  if pname == "__yolofile__"
     src = os.read_file(yolofile_path())
+    display = "Yolofile"
   else
     src = PROVISIONERS[pname]
     if src == nil
       src = ""
     end
   end
-  return {name: pname, src: src}
+
+  if src == ""
+    return {name: pname, display: display, marker: "", src: ""}
+  end
+
+  # Content-hashed marker so edits trigger a re-run.
+  short = str.slice(crypto.sha256(src), 0, 12)
+  marker = ""
+  if pname == "__yolofile__"
+    marker = "yolofile:#{short}"
+  else
+    marker = "#{pname}:#{short}"
+  end
+  return {name: pname, display: display, marker: marker, src: src}
 end
 
 # Internal: apply the given provisioner. The provisioner is plain bash that
 # runs as root inside the VM via `matchlock exec -i -- bash`. yolo's job
 # here is just to pick the right source, stream it in, and log status.
+# Returns the marker string (so the caller can persist it).
 def apply_provisioner(name, vm_id, prov_name)
   resolved = resolve_provisioner(prov_name)
-  pname = resolved.name
-  src   = resolved.src
+  src     = resolved.src
+  display = resolved.display
+  marker  = resolved.marker
   if src == ""
-    err_("unknown provisioner '#{pname}'")
+    err_("unknown provisioner '#{prov_name}'")
     puts "available:"
     for n in PROVISIONERS
       puts "  #{n}"
@@ -938,17 +955,12 @@ def apply_provisioner(name, vm_id, prov_name)
     os.exit(1)
   end
 
-  display = pname
-  if str.starts_with(pname, "yolofile:")
-    display = "Yolofile"
-  end
-
   tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
   os.write_file(tmp, src)
   log("applying #{color.bold(display)} to #{color.bold(vm_id)}")
   bash -c "cat #{tmp} | matchlock exec #{vm_id} -w #{WORKSPACE} -i -u root -- bash"
   os.remove(tmp)
-  return pname
+  return marker
 end
 
 # Install an AI agent inside the guest. Same shape as apply_provisioner but
@@ -975,10 +987,10 @@ end
 def cmd_provision(name, prov_name)
   acquire_lock(name, "provision")
   id = ensure_vm(name)
-  applied_name = apply_provisioner(name, id, prov_name)
-  mark_applied(name, id, applied_name)
+  applied_marker = apply_provisioner(name, id, prov_name)
+  mark_applied(name, id, applied_marker)
   release_lock(name)
-  log("provisioner #{color.bold(applied_name)} finished")
+  log("provisioner finished (marker: #{applied_marker})")
 end
 
 # ---------------- Main ----------------

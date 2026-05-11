@@ -192,6 +192,7 @@ def start_vm(name)
     os.exit(1)
   end
   os.write_file(state_file(name), id)
+  record_cwd(name)
   wait_exec_ready(id)
   return id
 end
@@ -218,6 +219,22 @@ end
 
 def applied_file(name)
   return filepath.join(STATE_DIR, "#{name}.applied")
+end
+
+def cwd_file(name)
+  return filepath.join(STATE_DIR, "#{name}.cwd")
+end
+
+def read_cwd(name)
+  path = cwd_file(name)
+  if !os.file_exists(path)
+    return ""
+  end
+  return str.trim(os.read_file(path))
+end
+
+def record_cwd(name)
+  os.write_file(cwd_file(name), os.cwd())
 end
 
 def read_state(name)
@@ -485,6 +502,19 @@ def default_name
 end
 
 # ---------------- Subcommands ----------------
+
+# Collapse $HOME to ~ for display.
+def display_path(p)
+  if p == ""
+    return color.dim("—")
+  end
+  home = os.getenv("HOME")
+  if home != "" && str.starts_with(p, home)
+    return "~" + str.slice(p, len(home), len(p))
+  end
+  return p
+end
+
 def cmd_ls
   table = matchlock_table()
   printf_hdr()
@@ -500,15 +530,16 @@ def cmd_ls
       st = row[0]
       im = row[1]
     end
-    print_row(n, id, st, im)
+    cwd = read_cwd(n)
+    print_row(n, id, st, im, display_path(cwd))
   end
 end
 
 def printf_hdr
-  fmt.printf("%-25s  %-20s  %-12s  %s\n", "NAME", "VM-ID", "STATUS", "IMAGE")
+  fmt.printf("%-25s  %-20s  %-12s  %-18s  %s\n", "NAME", "VM-ID", "STATUS", "IMAGE", "CWD")
 end
 
-def print_row(name, id, st, im)
+def print_row(name, id, st, im, cwd_disp)
   if st == "running"
     st_c = color.green(fmt.sprintf("%-12s", st))
   elsif st == "gone"
@@ -516,7 +547,7 @@ def print_row(name, id, st, im)
   else
     st_c = color.dim(fmt.sprintf("%-12s", st))
   end
-  fmt.printf("%-25s  %-20s  %s  %s\n", name, id, st_c, im)
+  fmt.printf("%-25s  %-20s  %s  %-18s  %s\n", name, id, st_c, im, cwd_disp)
 end
 
 def cmd_stop(name)
@@ -540,6 +571,10 @@ def cmd_rm(name)
   ap = applied_file(name)
   if os.file_exists(ap)
     os.remove(ap)
+  end
+  cf = cwd_file(name)
+  if os.file_exists(cf)
+    os.remove(cf)
   end
   # Best-effort: drop any stale lock dir for this name.
   ld = lock_dir(name)
@@ -593,6 +628,14 @@ def cmd_prune
       n = str.trim_suffix(filepath.base(f), ".vmid")
       log("pruning #{n} → #{id} (gone)")
       os.remove(f)
+      ap = applied_file(n)
+      if os.file_exists(ap)
+        os.remove(ap)
+      end
+      cf = cwd_file(n)
+      if os.file_exists(cf)
+        os.remove(cf)
+      end
     end
   end
 end

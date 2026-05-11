@@ -25,14 +25,13 @@ use "color"
 use "crypto"
 use "fmt"
 use "filepath"
-use "eval"
 use "conv"
 
 # ---------------- Embedded provisioners ----------------
-# Each provisioner is a rugo "script generator": it emits a bash script on
-# stdout, which yolo then runs inside the VM via `matchlock exec -i -- bash`.
-# To add a new one: drop provisioners/provisioner-<name>.rugo and embed it here.
-embed "provisioners/provisioner-fedora-go.rugo" as prov_fedora_go
+# Each provisioner is a plain bash script that runs INSIDE the guest VM as
+# root, fed through `matchlock exec -i -- bash`. Drop additional ones at
+# provisioners/provisioner-<name>.sh and embed them here.
+embed "provisioners/provisioner-fedora-go.sh" as prov_fedora_go
 
 PROVISIONERS = {
   "fedora-go" => prov_fedora_go
@@ -386,7 +385,7 @@ def print_help
   puts "Usage:"
   puts "  yolo                            Ensure VM, auto-provision (once), shell in."
   puts "  yolo -- CMD ARGS...             Run CMD inside the VM."
-  puts "  yolo --provisioner NAME [...]   Use a different provisioner (default: fedora-go)."
+  puts "  yolo --provisioner NAME [...]   Use a specific provisioner (overrides Yolofile)."
   puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
   puts "  yolo -n NAME [...]              Use a named VM."
   puts "  yolo ls                         List tracked VMs with live status."
@@ -399,7 +398,12 @@ def print_help
   puts "  yolo prune                      Drop dead name bindings."
   puts "  yolo provision [--provisioner NAME] [-n NAME]"
   puts "                                  Force re-apply a provisioner."
-  puts "  yolo provisioners               List embedded provisioners."
+  puts "  yolo provisioners               List provisioners (embedded + ./Yolofile)."
+  puts ""
+  puts "Yolofile:"
+  puts "  If ./Yolofile exists, yolo uses it as the default provisioner instead"
+  puts "  of '#{DEFAULT_PROVISIONER}'. It's a plain bash script that runs as root"
+  puts "  in the VM. Edit-and-re-run automatically re-provisions (content-hashed)."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image"
@@ -642,12 +646,16 @@ def cmd_attach(name, passthrough, prov_name, no_prov)
   id = ensure_vm(name)
 
   if !no_prov
-    pname = prov_name
-    if pname == ""
-      pname = DEFAULT_PROVISIONER
+    # Resolve once so we know the actual marker name (Yolofile hashes content).
+    resolved = resolve_provisioner(prov_name)
+    pname = resolved.name
+    if resolved.src == ""
+      err_("no provisioner available (no Yolofile, '#{prov_name}' unknown)")
+      release_lock(name)
+      os.exit(1)
     end
     if !is_applied(name, id, pname)
-      apply_provisioner(name, id, pname)
+      apply_provisioner(name, id, prov_name)
       mark_applied(name, id, pname)
     end
   end
@@ -667,58 +675,113 @@ end
 
 # List all embedded provisioners.
 def cmd_provisioners
-  puts "Available provisioners (default: #{DEFAULT_PROVISIONER}):"
+  default_label = DEFAULT_PROVISIONER
+  if has_yolofile()
+    default_label = "Yolofile (#{yolofile_path()})"
+  end
+  puts "Available provisioners (default: #{default_label}):"
   for n in PROVISIONERS
     marker = "  "
-    if n == DEFAULT_PROVISIONER
+    if !has_yolofile() && n == DEFAULT_PROVISIONER
       marker = color.green("* ")
     end
     puts "#{marker}#{n}"
   end
+  if has_yolofile()
+    star = color.green("* ")
+    yp = yolofile_path()
+    puts "#{star}yolofile  (#{yp})"
+  end
 end
 
-# Internal: render and apply the given provisioner. No skip-if-applied logic
-# (callers decide). Updates no marker.
+# ---------------- Yolofile (local provisioner) ----------------
+# If a file named Yolofile exists in $PWD, yolo uses it as the provisioner
+# instead of the embedded default. The marker key includes a sha256 of the
+# content so editing the Yolofile triggers a re-provision on the next attach.
+
+YOLOFILE = "Yolofile"
+
+def yolofile_path
+  return filepath.join(os.cwd(), YOLOFILE)
+end
+
+def has_yolofile
+  return os.file_exists(yolofile_path())
+end
+
+# Marker name used for is_applied/mark_applied bookkeeping. The hash suffix
+# ensures the marker becomes stale automatically when the Yolofile changes.
+def yolofile_marker_name
+  content = os.read_file(yolofile_path())
+  hash = crypto.sha256(content)
+  short = str.slice(hash, 0, 12)
+  return "yolofile:#{short}"
+end
+
+# Resolve a provisioner name to its rugo source. Returns "" if not found.
+#   - explicit name  → look it up in PROVISIONERS
+#   - "" (default)   → Yolofile if present, else DEFAULT_PROVISIONER
+def resolve_provisioner(prov_name)
+  pname = prov_name
+  if pname == ""
+    if has_yolofile()
+      pname = yolofile_marker_name()
+    else
+      pname = DEFAULT_PROVISIONER
+    end
+  end
+  src = ""
+  if str.starts_with(pname, "yolofile:")
+    src = os.read_file(yolofile_path())
+  else
+    src = PROVISIONERS[pname]
+    if src == nil
+      src = ""
+    end
+  end
+  return {name: pname, src: src}
+end
+
+# Internal: apply the given provisioner. The provisioner is plain bash that
+# runs as root inside the VM via `matchlock exec -i -- bash`. yolo's job
+# here is just to pick the right source, stream it in, and log status.
 def apply_provisioner(name, vm_id, prov_name)
-  src = PROVISIONERS[prov_name]
-  if src == nil
-    err_("unknown provisioner '#{prov_name}'")
+  resolved = resolve_provisioner(prov_name)
+  pname = resolved.name
+  src   = resolved.src
+  if src == ""
+    err_("unknown provisioner '#{pname}'")
     puts "available:"
     for n in PROVISIONERS
       puts "  #{n}"
     end
+    if has_yolofile()
+      puts "  yolofile (#{yolofile_path()})"
+    end
     os.exit(1)
   end
 
-  log("rendering provisioner #{color.bold(prov_name)}")
-  result = eval.run(src)
-  status = result["status"]
-  output = result["output"]
-  if status != 0
-    err_("provisioner '#{prov_name}' failed to render (exit #{status}):")
-    puts output
-    os.exit(1)
+  display = pname
+  if str.starts_with(pname, "yolofile:")
+    display = "Yolofile"
   end
 
-  tmp = "/tmp/yolo-prov-#{prov_name}-#{os.pid()}.sh"
-  os.write_file(tmp, output)
-  log("applying #{color.bold(prov_name)} to #{color.bold(vm_id)}")
-  bash -c "matchlock exec #{vm_id} -w #{WORKSPACE} -i -u root -- bash < #{tmp}"
+  tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
+  os.write_file(tmp, src)
+  log("applying #{color.bold(display)} to #{color.bold(vm_id)}")
+  bash -c "cat #{tmp} | matchlock exec #{vm_id} -w #{WORKSPACE} -i -u root -- bash"
   os.remove(tmp)
+  return pname
 end
 
 # Explicit `yolo provision` — always re-runs.
 def cmd_provision(name, prov_name)
-  pname = prov_name
-  if pname == ""
-    pname = DEFAULT_PROVISIONER
-  end
   acquire_lock(name, "provision")
   id = ensure_vm(name)
-  apply_provisioner(name, id, pname)
-  mark_applied(name, id, pname)
+  applied_name = apply_provisioner(name, id, prov_name)
+  mark_applied(name, id, applied_name)
   release_lock(name)
-  log("provisioner #{color.bold(pname)} finished")
+  log("provisioner #{color.bold(applied_name)} finished")
 end
 
 # ---------------- Main ----------------

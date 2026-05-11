@@ -57,20 +57,31 @@ and per-VM network policy. But out of the box you manage every VM by hand
 
 - Linux with KVM (`/dev/kvm` readable and writable)
 - [`matchlock`][matchlock-install] in `PATH`
-- [`rugo`][rugo-install] to run/build the script
+- For end users: just the prebuilt `yolo` binary (~2 MB static, no other
+  runtime deps — provisioners run as plain bash inside the guest VM).
+- For building from source: [`rugo`][rugo-install].
 
 [matchlock-install]: https://github.com/jingkaihe/matchlock#install
 [rugo-install]: https://github.com/rubiojr/rugo#install
 
 ## Install
 
-```bash
-# Run from source
-rugo run yolo.rugo …
+End users:
 
-# Or build a single static binary
+```bash
+# Drop the prebuilt static binary on your PATH.
+install -m 0755 yolo ~/.local/bin/yolo
+```
+
+From source:
+
+```bash
+# Build the static binary
 rugo build yolo.rugo
 install -m 0755 yolo ~/.local/bin/yolo
+
+# Or run unbuilt (slower startup; useful while hacking on yolo itself)
+rugo run yolo.rugo …
 ```
 
 ## Usage
@@ -163,14 +174,14 @@ implicitly invalidated and the provisioner re-runs.
 
 ## Provisioners
 
-Provisioners live in [`provisioners/`](./provisioners) as rugo source files,
-embedded into the binary at compile time via rugo's `embed` directive.
+Provisioners live in [`provisioners/`](./provisioners) as **plain bash
+scripts**, embedded into the binary at compile time via rugo's `embed`
+directive. yolo pipes the script into `matchlock exec <vm> -i -u root --
+bash`, so it runs as root inside the VM with stdio streamed back to your
+terminal.
 
-A provisioner is a **rugo script-generator**: it runs on the host, uses
-rugo's string interpolation to template a bash script tailored to host
-architecture, and prints that script on stdout. `yolo` captures the output
-and pipes it into the VM via `matchlock exec <vm> -i -u root -- bash`,
-streaming the output to your terminal.
+No language runtime is needed inside the guest beyond `bash` itself —
+everything compiled, no rugo, no Go.
 
 ### Built-in provisioners
 
@@ -186,28 +197,22 @@ yolo provisioners
 
 ### Adding a new provisioner
 
-1. Drop a file at `provisioners/provisioner-<name>.rugo`:
+1. Drop a bash script at `provisioners/provisioner-<name>.sh`:
 
-   ```ruby
-   # provisioners/provisioner-fedora-node.rugo
-   use "os"
-   node_ver = os.getenv("YOLO_NODE_VERSION")
-   if node_ver == ""
-     node_ver = "22"
-   end
-   script = <<~BASH
-     set -euo pipefail
-     dnf -y install nodejs#{node_ver} npm
-     corepack enable
-     echo "node $(node --version), pnpm $(pnpm --version)"
-   BASH
-   puts script
+   ```bash
+   #!/usr/bin/env bash
+   # provisioners/provisioner-fedora-node.sh
+   set -euo pipefail
+   NODE_VER="${YOLO_NODE_VERSION:-22}"
+   dnf -y install "nodejs${NODE_VER}" npm
+   corepack enable
+   echo "node $(node --version), pnpm $(pnpm --version)"
    ```
 
 2. Register it in `yolo.rugo`:
 
    ```ruby
-   embed "provisioners/provisioner-fedora-node.rugo" as prov_fedora_node
+   embed "provisioners/provisioner-fedora-node.sh" as prov_fedora_node
    PROVISIONERS = {
      "fedora-go"   => prov_fedora_go,
      "fedora-node" => prov_fedora_node
@@ -218,11 +223,67 @@ yolo provisioners
 
 ### Testing a provisioner without a VM
 
-Provisioners are plain rugo programs — run one on the host to inspect the
-bash it would emit:
+Provisioners are plain bash. Run one in any VM/container:
 
 ```bash
-rugo run provisioners/provisioner-fedora-go.rugo | less
+docker run --rm -it -v $PWD/provisioners:/p fedora:44 bash /p/provisioner-fedora-go.sh
+```
+
+Or simply `shellcheck provisioners/*.sh` to lint.
+
+### Yolofile (per-project provisioner)
+
+For project-specific tooling, drop a `Yolofile` in the project root. If
+present, `yolo` uses it as the default provisioner instead of
+`fedora-go`. The Yolofile is a **plain bash script** that runs as root
+inside the VM.
+
+```bash
+# ~/code/my-rust-project/Yolofile
+#!/usr/bin/env bash
+set -euo pipefail
+
+CHANNEL="${YOLO_RUST_CHANNEL:-stable}"
+
+dnf -y install make gcc openssl-devel pkgconfig
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  | sh -s -- -y --default-toolchain "$CHANNEL" --profile minimal
+
+cat > /etc/profile.d/cargo.sh <<'P'
+export PATH=$HOME/.cargo/bin:$PATH
+P
+
+source /root/.cargo/env
+cargo install --locked cargo-watch cargo-edit cargo-nextest
+echo "ready: $(rustc --version)"
+```
+
+Then in that directory:
+
+```bash
+yolo                 # boots fedora:44, runs the Yolofile, drops you into bash
+yolo provisioners
+# Available provisioners (default: Yolofile (/home/me/code/my-rust-project/Yolofile)):
+#   fedora-go
+# * yolofile  (/home/me/code/my-rust-project/Yolofile)
+```
+
+The marker name yolo stores is `yolofile:<sha256-prefix>` of the file content
+— **editing the Yolofile invalidates the marker automatically**, so the next
+`yolo` re-provisions without you needing `--force` or `yolo provision`. The
+state file looks like:
+
+```
+$ cat $XDG_RUNTIME_DIR/yolo/<name>.applied
+vm-b1e68449
+yolofile:2ade95cded20
+```
+
+Override or skip the Yolofile when needed:
+
+```bash
+yolo --provisioner fedora-go   # ignore Yolofile, use the embedded fedora-go
+yolo --no-provision            # ignore everything, just attach
 ```
 
 ## Networking

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Yolofile — provisions a yolo development VM with Go (latest) + rugo.
+# Runs as root inside the guest microVM via `matchlock exec -i -- bash`.
+
+set -euo pipefail
+
+# ---------------- Arch ----------------
+case "$(uname -m)" in
+    x86_64)  GOARCH=amd64 ;;
+    aarch64) GOARCH=arm64 ;;
+    *)       echo "unsupported arch: $(uname -m)"; exit 1 ;;
+esac
+
+# ---------------- Non-interactive dnf ----------------
+if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
+    echo 'assumeyes=True'          >> /etc/dnf/dnf.conf
+    echo 'install_weak_deps=False' >> /etc/dnf/dnf.conf
+fi
+
+# ---------------- Base tooling ----------------
+dnf -q install \
+    tar gzip xz which findutils ca-certificates curl-minimal \
+    git make gcc
+
+# ---------------- Latest Go ----------------
+# https://go.dev/VERSION?m=text → "go1.26.3\ntime ..."
+GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text | head -n1 | sed 's/^go//')"
+echo "==> [yolofile] installing Go ${GO_VERSION} (${GOARCH})"
+[ -d /usr/local/go ] && rm -rf /usr/local/go
+curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz" \
+    | tar -C /usr/local -xz
+
+# ---------------- Shell integration ----------------
+cat > /etc/profile.d/go.sh <<'PROFILE'
+export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH
+export GOPATH=$HOME/go
+PROFILE
+chmod 0644 /etc/profile.d/go.sh
+
+# Fresh fedora:44 ships no /root/.bashrc; create one that sources /etc/bashrc.
+if [ ! -f /root/.bashrc ]; then
+    cat > /root/.bashrc <<'BASHRC'
+if [ -f /etc/bashrc ]; then . /etc/bashrc; fi
+BASHRC
+fi
+if [ ! -f /root/.bash_profile ]; then
+    cat > /root/.bash_profile <<'BP'
+if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
+BP
+fi
+
+# Make Go available for the rest of THIS script.
+export PATH=/usr/local/go/bin:/root/go/bin:$PATH
+export GOPATH=/root/go
+
+echo "==> [yolofile] Go version:"
+/usr/local/go/bin/go version
+
+# ---------------- rugo ----------------
+echo "==> [yolofile] installing rugo (latest)"
+/usr/local/go/bin/go install github.com/rubiojr/rugo@latest
+
+# Symlink rugo into /usr/local/bin so it's on PATH without sourcing the profile.
+ln -sf /root/go/bin/rugo /usr/local/bin/rugo
+
+echo "==> [yolofile] rugo version:"
+/usr/local/bin/rugo --version || true
+
+echo "==> [yolofile] done. Try: go version && rugo --version"

@@ -1,0 +1,120 @@
+# provisioner-fedora-go.rugo
+#
+# Installs upstream Go (from go.dev) and a curated set of popular Go dev
+# tools into a Fedora-based yolo VM.
+#
+# Architecture: this provisioner is a "script generator". It runs on the host,
+# uses rugo string interpolation to template a bash script tailored to the
+# host's architecture, and prints that script to stdout. yolo captures the
+# output and pipes it into `matchlock exec <vm> -i -- bash`.
+#
+# Override the Go version with $YOLO_GO_VERSION before running yolo provision.
+
+use "os"
+use "str"
+
+# -------- Host probe (host arch == guest arch for matchlock VMs) --------
+arch_raw = `uname -m`
+goarch = "amd64"
+if arch_raw == "aarch64"
+  goarch = "arm64"
+end
+
+# Resolve the latest Go release from go.dev (override with $YOLO_GO_VERSION).
+# go.dev/VERSION?m=text returns e.g. "go1.26.3\ntime 2026-05-04T...".
+go_version = os.getenv("YOLO_GO_VERSION")
+if go_version == ""
+  raw = try `curl -fsSL https://go.dev/VERSION?m=text` or "go1.24.0"
+  first = ""
+  for line in str.each_line(raw)
+    if first == ""
+      first = str.trim(line)
+    end
+  end
+  go_version = str.trim_prefix(first, "go")
+  if go_version == ""
+    go_version = "1.24.0"
+  end
+end
+
+go_tarball = "go#{go_version}.linux-#{goarch}.tar.gz"
+go_url     = "https://go.dev/dl/#{go_tarball}"
+
+# -------- Emit the bash script the VM should run --------
+# Note: rugo `#{...}` interpolates at script-generation time;
+# bash `$VAR` references are emitted literally for runtime expansion.
+script = <<~BASH
+  set -euo pipefail
+
+  echo "==> [yolo:fedora-go] installing Go #{go_version} (#{goarch})"
+
+  # Make dnf fully non-interactive for the rest of this script:
+  # - assumeyes=True (auto-confirm everything, incl. GPG key acceptance)
+  # - install_weak_deps=False (skip Recommends, smaller install)
+  if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
+      echo 'assumeyes=True'           >> /etc/dnf/dnf.conf
+      echo 'install_weak_deps=False'  >> /etc/dnf/dnf.conf
+  fi
+
+  # Base tooling needed for the install + Go itself
+  dnf -q install \
+      tar gzip xz which findutils ca-certificates curl-minimal \
+      git make gcc
+
+  # Install upstream Go
+  if [ -d /usr/local/go ]; then
+      rm -rf /usr/local/go
+  fi
+  curl -fsSL "#{go_url}" | tar -C /usr/local -xz
+
+  # PATH + GOPATH for future shells. /etc/profile.d/*.sh is sourced by
+  # login shells AND by Fedora's /etc/bashrc for interactive non-login
+  # shells (if /etc/bashrc is in turn sourced by the user's ~/.bashrc).
+  cat > /etc/profile.d/go.sh <<'PROFILE'
+  export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH
+  export GOPATH=$HOME/go
+  PROFILE
+  chmod 0644 /etc/profile.d/go.sh
+
+  # Ensure /root/.bashrc exists and sources /etc/bashrc — fresh fedora:44
+  # base images don't ship a default /root/.bashrc, which means non-login
+  # interactive bash misses /etc/profile.d/*.sh otherwise.
+  if [ ! -f /root/.bashrc ] || ! grep -q '/etc/bashrc' /root/.bashrc; then
+      cat >> /root/.bashrc <<'BASHRC'
+  # Source global definitions
+  if [ -f /etc/bashrc ]; then
+      . /etc/bashrc
+  fi
+  BASHRC
+  fi
+
+  # Same for /root/.bash_profile (login shells).
+  if [ ! -f /root/.bash_profile ]; then
+      cat > /root/.bash_profile <<'BP'
+  if [ -f ~/.bashrc ]; then
+      . ~/.bashrc
+  fi
+  BP
+  fi
+
+  # Make Go available for the rest of THIS script
+  export PATH=/usr/local/go/bin:/root/go/bin:$PATH
+  export GOPATH=/root/go
+
+  echo "==> [yolo:fedora-go] Go version:"
+  /usr/local/go/bin/go version
+
+  echo "==> [yolo:fedora-go] installing dev tooling"
+  # The classic Go developer kit.
+  /usr/local/go/bin/go install golang.org/x/tools/gopls@latest
+  /usr/local/go/bin/go install honnef.co/go/tools/cmd/staticcheck@latest
+  /usr/local/go/bin/go install github.com/go-delve/delve/cmd/dlv@latest
+  /usr/local/go/bin/go install golang.org/x/tools/cmd/goimports@latest
+  /usr/local/go/bin/go install mvdan.cc/gofumpt@latest
+  /usr/local/go/bin/go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+  echo "==> [yolo:fedora-go] done. Installed into /usr/local/go and /root/go/bin"
+  echo "    Try: go version && gopls version && dlv version"
+BASH
+
+puts script

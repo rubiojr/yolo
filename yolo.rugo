@@ -1,0 +1,754 @@
+# yolo.rugo — fast persistent matchlock VMs, one per directory.
+#
+# Usage:
+#   yolo                        Attach (or create) the VM for $PWD; drop into bash.
+#   yolo -- CMD ARGS...         Run CMD inside that VM (auto-create if needed).
+#   yolo -n NAME [...]          Use a named VM instead of the per-CWD one.
+#   yolo ls                     List all yolo-tracked VMs with live status.
+#   yolo stop [-n NAME]         Stop the VM (state preserved on disk).
+#   yolo rm   [-n NAME]         Stop + remove the VM and its name binding.
+#   yolo logs [-n NAME]         Show the VM's log.
+#   yolo id   [-n NAME]         Print the vm-id only (for scripting).
+#   yolo status [-n NAME]       Print "<state> (<vm-id>)".
+#   yolo prune                  Drop dead name bindings (VM gone).
+#
+# Env tweaks:
+#   YOLO_IMAGE      (default: fedora:44)
+#   YOLO_ALLOW      (default: *)               comma list of allowed hostnames
+#   YOLO_WORKSPACE  (default: /work)           guest mount point for $PWD
+#   YOLO_NAME       (default: cwd-<sha1>)      override the auto-derived name
+#   YOLO_USER       (default: unset)           pass --user to matchlock
+
+use "os"
+use "str"
+use "color"
+use "crypto"
+use "fmt"
+use "filepath"
+use "eval"
+use "conv"
+
+# ---------------- Embedded provisioners ----------------
+# Each provisioner is a rugo "script generator": it emits a bash script on
+# stdout, which yolo then runs inside the VM via `matchlock exec -i -- bash`.
+# To add a new one: drop provisioners/provisioner-<name>.rugo and embed it here.
+embed "provisioners/provisioner-fedora-go.rugo" as prov_fedora_go
+
+PROVISIONERS = {
+  "fedora-go" => prov_fedora_go
+}
+DEFAULT_PROVISIONER = "fedora-go"
+
+# ---------------- Config ----------------
+def env_or(name, fallback)
+  v = os.getenv(name)
+  if v == ""
+    return fallback
+  end
+  return v
+end
+
+IMAGE     = env_or("YOLO_IMAGE",     "fedora:44")
+# Setting YOLO_ALLOW enables matchlock's MITM proxy and restricts egress to the
+# listed hosts. Leave empty (default) for plain NAT — the guest gets real
+# Internet cert chains, so dnf/curl/go-install work out of the box. Once you
+# set this you'll also need to trust matchlock's per-VM CA in the guest (or
+# use --no-check-cert flags), since MITM rewrites every TLS cert chain.
+ALLOW     = env_or("YOLO_ALLOW",     "")
+WORKSPACE = env_or("YOLO_WORKSPACE", "/work")
+# Resource defaults — bigger than matchlock's stock 1 CPU / 512 MB / 5 GB,
+# because building Go dev tools (or anything similar) on the stock allocation
+# runs out of disk and is painfully slow. Override per env var if needed.
+CPUS      = env_or("YOLO_CPUS",      "2")
+MEM_MB    = env_or("YOLO_MEM_MB",    "2048")
+DISK_MB   = env_or("YOLO_DISK_MB",   "16384")
+RUNTIME   = env_or("XDG_RUNTIME_DIR", "/tmp")
+STATE_DIR = filepath.join(RUNTIME, "yolo")
+USER_FLAG = env_or("YOLO_USER", "")
+
+mkdir -p "#{STATE_DIR}"
+
+# ---------------- Logging ----------------
+def log(msg)
+  prefix = color.dim("[yolo]")
+  puts "#{prefix} #{msg}"
+end
+def warn(msg)
+  prefix = color.dim("[yolo]")
+  puts "#{prefix} #{color.yellow(msg)}"
+end
+def err_(msg)
+  prefix = color.dim("[yolo]")
+  puts "#{prefix} #{color.red(msg)}"
+end
+
+# ---------------- matchlock helpers ----------------
+# Returns a hash {vm-id => [status, image]} of every VM matchlock knows about.
+def matchlock_table
+  out = try `matchlock list 2>/dev/null` or ""
+  rows = {}
+  i = 0
+  for line in str.each_line(out)
+    i = i + 1
+    if i == 1
+      # header row
+    else
+      parts = str.fields(line)
+      if len(parts) >= 3
+        rows[parts[0]] = [parts[1], parts[2]]
+      end
+    end
+  end
+  return rows
+end
+
+def vm_status(id, table)
+  if id == "" || id == nil
+    return ""
+  end
+  row = table[id]
+  if row == nil
+    return ""
+  end
+  return row[0]
+end
+
+# Best-effort: stop and remove a vm-id.
+def vm_purge(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "matchlock kill #{id} >/dev/null 2>&1"` or nil
+  try `bash -c "matchlock rm   #{id} >/dev/null 2>&1"` or nil
+end
+
+# Start a fresh VM bound to $name. Returns the new vm-id.
+def start_vm(name)
+  log("starting #{color.bold(IMAGE)} VM #{color.bold(name)} for #{os.cwd()}")
+  user_arg = ""
+  if USER_FLAG != ""
+    user_arg = "--user #{USER_FLAG}"
+  end
+  # Only set --allow-host when YOLO_ALLOW is non-empty: passing it triggers
+  # matchlock's MITM proxy, which breaks TLS in the guest (no CA in trust store).
+  allow_arg = ""
+  if ALLOW != ""
+    allow_arg = "--allow-host \"#{ALLOW}\""
+  end
+  cwd = os.cwd()
+  script = <<~SH
+    matchlock run \
+      --image "#{IMAGE}" \
+      --workspace "#{WORKSPACE}" \
+      -v "#{cwd}:.:host_fs" \
+      -w "#{WORKSPACE}" \
+      --hostname "#{name}" \
+      --cpus #{CPUS} \
+      --memory #{MEM_MB} \
+      --disk-size #{DISK_MB} \
+      #{allow_arg} \
+      #{user_arg} \
+      -d 2>&1
+  SH
+  out = try os.exec(script) or msg
+      err_("matchlock run failed:")
+      puts msg
+      os.exit(1)
+      ""
+    end
+  # matchlock prints "Sandbox vm-xxxx is running" to merged stderr.
+  id = ""
+  for line in str.each_line(out)
+    for word in str.fields(line)
+      if str.starts_with(word, "vm-")
+        id = word
+      end
+    end
+  end
+  if id == ""
+    err_("could not parse vm-id from matchlock output:")
+    puts out
+    os.exit(1)
+  end
+  os.write_file(state_file(name), id)
+  wait_exec_ready(id)
+  return id
+end
+
+# matchlock run -d returns as soon as the VM's state is "running", but the
+# exec relay socket is created moments later. Wait for it (up to ~3s).
+def wait_exec_ready(id)
+  home = os.getenv("HOME")
+  sock = "#{home}/.matchlock/vms/#{id}/exec.sock"
+  i = 0
+  while i < 60
+    if os.file_exists(sock)
+      return
+    end
+    sleep 0.05
+    i = i + 1
+  end
+  warn("exec.sock did not appear within 3s for #{id}; trying anyway")
+end
+
+def state_file(name)
+  return filepath.join(STATE_DIR, "#{name}.vmid")
+end
+
+def applied_file(name)
+  return filepath.join(STATE_DIR, "#{name}.applied")
+end
+
+def read_state(name)
+  path = state_file(name)
+  if !os.file_exists(path)
+    return ""
+  end
+  return str.trim(os.read_file(path))
+end
+
+# Read provisioners already applied to the *current* vm-id. If the marker is
+# stale (vm-id mismatch, e.g. after auto-heal recreated the VM), returns [].
+def applied_list(name, vm_id)
+  path = applied_file(name)
+  if !os.file_exists(path)
+    return []
+  end
+  content = os.read_file(path)
+  lines = []
+  for line in str.each_line(content)
+    trimmed = str.trim(line)
+    if trimmed != ""
+      lines = append(lines, trimmed)
+    end
+  end
+  if len(lines) < 1
+    return []
+  end
+  if lines[0] != vm_id
+    return []
+  end
+  out = []
+  i = 1
+  while i < len(lines)
+    out = append(out, lines[i])
+    i = i + 1
+  end
+  return out
+end
+
+def is_applied(name, vm_id, prov_name)
+  for p in applied_list(name, vm_id)
+    if p == prov_name
+      return true
+    end
+  end
+  return false
+end
+
+def mark_applied(name, vm_id, prov_name)
+  list = applied_list(name, vm_id)
+  found = false
+  for p in list
+    if p == prov_name
+      found = true
+    end
+  end
+  if !found
+    list = append(list, prov_name)
+  end
+  body = vm_id
+  for p in list
+    body = body + "\n" + p
+  end
+  os.write_file(applied_file(name), body + "\n")
+end
+
+# ---------------- Inter-process lock (per name) ----------------
+# Prevents two concurrent `yolo`s on the same name from racing during VM
+# creation / provisioning. We use atomic mkdir() as the lock primitive: it
+# returns success only if it created the directory, failure if it existed.
+# On stale locks (process died), the PID liveness check reclaims them.
+
+def lock_dir(name)
+  return filepath.join(STATE_DIR, "#{name}.lock")
+end
+
+def acquire_lock(name, label)
+  ld = lock_dir(name)
+  warned = false
+  iter = 0
+  while true
+    made = try `bash -c "mkdir #{ld} 2>/dev/null && echo OK"` or ""
+    if str.trim(made) == "OK"
+      os.write_file(filepath.join(ld, "pid"), "#{os.pid()}")
+      os.write_file(filepath.join(ld, "label"), label)
+      return
+    end
+    # Lock is held; check if the holder is still alive.
+    pid_file = filepath.join(ld, "pid")
+    holder_pid = ""
+    holder_label = "?"
+    if os.file_exists(pid_file)
+      holder_pid = str.trim(os.read_file(pid_file))
+    end
+    lf = filepath.join(ld, "label")
+    if os.file_exists(lf)
+      holder_label = str.trim(os.read_file(lf))
+    end
+    if holder_pid != ""
+      raw = try `bash -c "/bin/kill -0 #{holder_pid} 2>/dev/null && echo y || echo n"` or "n"
+      alive = str.trim(raw)
+      if alive == "n"
+        warn("removing stale lock for '#{name}' (pid #{holder_pid} dead)")
+        try `bash -c "rm -rf #{ld}"` or nil
+        warned = false
+        iter = 0
+        next
+      end
+    end
+    if !warned
+      log("waiting for another yolo (#{holder_label}, pid #{holder_pid})...")
+      warned = true
+    end
+    sleep 0.5
+    iter = iter + 1
+  end
+end
+
+def release_lock(name)
+  ld = lock_dir(name)
+  try `bash -c "rm -rf #{ld}"` or nil
+end
+
+# Ensure a running VM bound to $name; auto-heal stopped/missing.
+def ensure_vm(name)
+  id = read_state(name)
+  table = matchlock_table()
+  status = vm_status(id, table)
+  if status == "running"
+    return id
+  end
+  if status == ""
+    if id != ""
+      warn("tracked VM #{id} is gone; recreating")
+      os.remove(state_file(name))
+    end
+  else
+    warn("VM #{id} is in state '#{status}'; recreating")
+    vm_purge(id)
+    os.remove(state_file(name))
+  end
+  return start_vm(name)
+end
+
+# ---------------- Arg parsing ----------------
+# Parse a flat argv into: subcommand, -n name, --provisioner, rest, -- passthrough.
+def parse_args(args)
+  sub = ""
+  name = ""
+  prov = ""
+  no_prov = false
+  rest = []
+  passthrough = []
+  in_passthrough = false
+  i = 0
+  while i < len(args)
+    a = args[i]
+    if in_passthrough
+      passthrough = append(passthrough, a)
+    elsif a == "--"
+      in_passthrough = true
+    elsif a == "-n" || a == "--name"
+      i = i + 1
+      name = args[i]
+    elsif a == "--provisioner" || a == "-P"
+      i = i + 1
+      prov = args[i]
+    elsif a == "--no-provision" || a == "--no-provisioner"
+      no_prov = true
+    elsif a == "-h" || a == "--help"
+      print_help()
+      os.exit(0)
+    elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners")
+      sub = a
+    else
+      rest = append(rest, a)
+    end
+    i = i + 1
+  end
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, rest: rest, passthrough: passthrough}
+end
+
+def print_help
+  puts "yolo — fast persistent matchlock VMs, one per directory."
+  puts ""
+  puts "Usage:"
+  puts "  yolo                            Ensure VM, auto-provision (once), shell in."
+  puts "  yolo -- CMD ARGS...             Run CMD inside the VM."
+  puts "  yolo --provisioner NAME [...]   Use a different provisioner (default: fedora-go)."
+  puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
+  puts "  yolo -n NAME [...]              Use a named VM."
+  puts "  yolo ls                         List tracked VMs with live status."
+  puts "  yolo du                         List tracked VMs with disk usage."
+  puts "  yolo stop [-n NAME]             Stop VM."
+  puts "  yolo rm   [-n NAME]             Stop + remove VM and binding."
+  puts "  yolo logs [-n NAME]             Show VM log."
+  puts "  yolo id   [-n NAME]             Print vm-id."
+  puts "  yolo status [-n NAME]           Print state + vm-id + applied provisioners."
+  puts "  yolo prune                      Drop dead name bindings."
+  puts "  yolo provision [--provisioner NAME] [-n NAME]"
+  puts "                                  Force re-apply a provisioner."
+  puts "  yolo provisioners               List embedded provisioners."
+  puts ""
+  puts "Env vars (defaults):"
+  puts "  YOLO_IMAGE=fedora:44       OCI image"
+  puts "  YOLO_CPUS=2                vCPU count"
+  puts "  YOLO_MEM_MB=2048           Memory (MiB)"
+  puts "  YOLO_DISK_MB=16384         Rootfs disk (MiB)"
+  puts "  YOLO_WORKSPACE=/work       Guest mount point for $PWD"
+  puts "  YOLO_ALLOW=                Comma list of allow-listed hosts (enables MITM)"
+  puts "  YOLO_USER=                 Run as uid:gid inside guest"
+  puts "  YOLO_NAME=                 Override the auto-derived per-CWD name"
+end
+
+def default_name
+  override = env_or("YOLO_NAME", "")
+  if override != ""
+    return override
+  end
+  h = crypto.sha1(os.cwd())
+  return "cwd-" + str.slice(h, 0, 10)
+end
+
+# ---------------- Subcommands ----------------
+def cmd_ls
+  table = matchlock_table()
+  printf_hdr()
+  files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
+  for f in files
+    n = str.trim_suffix(filepath.base(f), ".vmid")
+    id = str.trim(os.read_file(f))
+    row = table[id]
+    if row == nil
+      st = "gone"
+      im = "—"
+    else
+      st = row[0]
+      im = row[1]
+    end
+    print_row(n, id, st, im)
+  end
+end
+
+def printf_hdr
+  fmt.printf("%-25s  %-20s  %-12s  %s\n", "NAME", "VM-ID", "STATUS", "IMAGE")
+end
+
+def print_row(name, id, st, im)
+  if st == "running"
+    st_c = color.green(fmt.sprintf("%-12s", st))
+  elsif st == "gone"
+    st_c = color.red(fmt.sprintf("%-12s", st))
+  else
+    st_c = color.dim(fmt.sprintf("%-12s", st))
+  end
+  fmt.printf("%-25s  %-20s  %s  %s\n", name, id, st_c, im)
+end
+
+def cmd_stop(name)
+  id = read_state(name)
+  if id == ""
+    warn("no VM tracked for '#{name}'")
+    return
+  end
+  out = try `bash -c "matchlock kill #{id} 2>&1"` or "already stopped"
+  log("stopped #{id} (#{name})")
+end
+
+def cmd_rm(name)
+  id = read_state(name)
+  if id == ""
+    warn("no VM tracked for '#{name}'")
+    return
+  end
+  vm_purge(id)
+  os.remove(state_file(name))
+  ap = applied_file(name)
+  if os.file_exists(ap)
+    os.remove(ap)
+  end
+  # Best-effort: drop any stale lock dir for this name.
+  ld = lock_dir(name)
+  try `bash -c "rm -rf #{ld}"` or nil
+  log("removed #{id} (#{name})")
+end
+
+def cmd_logs(name, extra)
+  id = read_state(name)
+  if id == ""
+    err_("no VM tracked for '#{name}'")
+    os.exit(1)
+  end
+  extra_str = str.join(extra, " ")
+  bash -c "matchlock log #{id} #{extra_str}"
+end
+
+def cmd_id(name)
+  id = read_state(name)
+  if id != ""
+    puts id
+  end
+end
+
+def cmd_status(name)
+  id = read_state(name)
+  if id == ""
+    puts "untracked"
+    return
+  end
+  table = matchlock_table()
+  st = vm_status(id, table)
+  if st == ""
+    st = "gone"
+  end
+  applied = applied_list(name, id)
+  if len(applied) == 0
+    puts "#{st} (#{id}) applied: -"
+  else
+    csv = str.join(applied, ",")
+    puts "#{st} (#{id}) applied: #{csv}"
+  end
+end
+
+def cmd_prune
+  files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
+  table = matchlock_table()
+  for f in files
+    id = str.trim(os.read_file(f))
+    if vm_status(id, table) == ""
+      n = str.trim_suffix(filepath.base(f), ".vmid")
+      log("pruning #{n} → #{id} (gone)")
+      os.remove(f)
+    end
+  end
+end
+
+# Format a byte count as a human-readable string.
+def human_bytes(n)
+  if n < 1024
+    return fmt.sprintf("%d B", n)
+  end
+  k = n / 1024.0
+  if k < 1024.0
+    return fmt.sprintf("%.1f KiB", k)
+  end
+  m = k / 1024.0
+  if m < 1024.0
+    return fmt.sprintf("%.1f MiB", m)
+  end
+  g = m / 1024.0
+  return fmt.sprintf("%.2f GiB", g)
+end
+
+# Apparent size (sparse-aware OFF): what `du -sb` reports — for matchlock VMs
+# this is dominated by the upper.ext4 logical size = YOLO_DISK_MB.
+def vm_disk_apparent(home, id)
+  path = "#{home}/.matchlock/vms/#{id}"
+  if !os.file_exists(path)
+    return -1
+  end
+  raw = try `du -sb "#{path}" 2>/dev/null` or ""
+  trimmed = str.trim(raw)
+  if trimmed == ""
+    return -1
+  end
+  fields = str.fields(trimmed)
+  if len(fields) < 1
+    return -1
+  end
+  return conv.to_i(fields[0])
+end
+
+# Real allocated bytes on the host filesystem (sparse-aware). For a typical
+# matchlock VM this is much less than the apparent size because upper.ext4
+# is a sparse file.
+def vm_disk_real(home, id)
+  path = "#{home}/.matchlock/vms/#{id}"
+  if !os.file_exists(path)
+    return -1
+  end
+  raw = try `du -s --block-size=1 "#{path}" 2>/dev/null` or ""
+  trimmed = str.trim(raw)
+  if trimmed == ""
+    return -1
+  end
+  fields = str.fields(trimmed)
+  if len(fields) < 1
+    return -1
+  end
+  return conv.to_i(fields[0])
+end
+
+def cmd_du
+  home = os.getenv("HOME")
+  table = matchlock_table()
+  fmt.printf("%-25s  %-20s  %-10s  %-12s  %s\n", "NAME", "VM-ID", "STATUS", "USED", "ALLOCATED")
+  files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
+  total_real = 0
+  total_app = 0
+  for f in files
+    n = str.trim_suffix(filepath.base(f), ".vmid")
+    id = str.trim(os.read_file(f))
+    real_b = vm_disk_real(home, id)
+    app_b  = vm_disk_apparent(home, id)
+    if real_b < 0
+      real_str = color.dim(fmt.sprintf("%-12s", "—"))
+    else
+      total_real = total_real + real_b
+      real_str = fmt.sprintf("%-12s", human_bytes(real_b))
+    end
+    if app_b < 0
+      app_str = color.dim("—")
+    else
+      total_app = total_app + app_b
+      app_str = human_bytes(app_b)
+    end
+    st = vm_status(id, table)
+    if st == ""
+      st = "gone"
+    end
+    if st == "running"
+      st_c = color.green(fmt.sprintf("%-10s", st))
+    elsif st == "gone"
+      st_c = color.red(fmt.sprintf("%-10s", st))
+    else
+      st_c = color.dim(fmt.sprintf("%-10s", st))
+    end
+    n_pad = fmt.sprintf("%-25s", n)
+    id_pad = fmt.sprintf("%-20s", id)
+    puts "#{n_pad}  #{id_pad}  #{st_c}  #{real_str}  #{app_str}"
+  end
+  # Total row: pad the whole prefix to the USED column, then write both
+  # totals without further format-string padding (ANSI codes throw it off).
+  prefix = fmt.sprintf("%-61s", "TOTAL")
+  real_total_s = color.bold(fmt.sprintf("%-12s", human_bytes(total_real)))
+  app_total_s  = color.bold(human_bytes(total_app))
+  puts "#{prefix}#{real_total_s}  #{app_total_s}"
+end
+
+def cmd_attach(name, passthrough, prov_name, no_prov)
+  acquire_lock(name, "setup")
+  id = ensure_vm(name)
+
+  if !no_prov
+    pname = prov_name
+    if pname == ""
+      pname = DEFAULT_PROVISIONER
+    end
+    if !is_applied(name, id, pname)
+      apply_provisioner(name, id, pname)
+      mark_applied(name, id, pname)
+    end
+  end
+
+  # Release the lock BEFORE attaching: the interactive shell may run forever,
+  # and we want other terminals to be able to attach concurrently to the
+  # already-set-up VM.
+  release_lock(name)
+
+  if len(passthrough) == 0
+    bash -c "matchlock exec #{id} -w #{WORKSPACE} -it -- bash -l"
+  else
+    cmd = str.join(passthrough, " ")
+    bash -c "matchlock exec #{id} -w #{WORKSPACE} -it -- bash -lc '#{cmd}'"
+  end
+end
+
+# List all embedded provisioners.
+def cmd_provisioners
+  puts "Available provisioners (default: #{DEFAULT_PROVISIONER}):"
+  for n in PROVISIONERS
+    marker = "  "
+    if n == DEFAULT_PROVISIONER
+      marker = color.green("* ")
+    end
+    puts "#{marker}#{n}"
+  end
+end
+
+# Internal: render and apply the given provisioner. No skip-if-applied logic
+# (callers decide). Updates no marker.
+def apply_provisioner(name, vm_id, prov_name)
+  src = PROVISIONERS[prov_name]
+  if src == nil
+    err_("unknown provisioner '#{prov_name}'")
+    puts "available:"
+    for n in PROVISIONERS
+      puts "  #{n}"
+    end
+    os.exit(1)
+  end
+
+  log("rendering provisioner #{color.bold(prov_name)}")
+  result = eval.run(src)
+  status = result["status"]
+  output = result["output"]
+  if status != 0
+    err_("provisioner '#{prov_name}' failed to render (exit #{status}):")
+    puts output
+    os.exit(1)
+  end
+
+  tmp = "/tmp/yolo-prov-#{prov_name}-#{os.pid()}.sh"
+  os.write_file(tmp, output)
+  log("applying #{color.bold(prov_name)} to #{color.bold(vm_id)}")
+  bash -c "matchlock exec #{vm_id} -w #{WORKSPACE} -i -u root -- bash < #{tmp}"
+  os.remove(tmp)
+end
+
+# Explicit `yolo provision` — always re-runs.
+def cmd_provision(name, prov_name)
+  pname = prov_name
+  if pname == ""
+    pname = DEFAULT_PROVISIONER
+  end
+  acquire_lock(name, "provision")
+  id = ensure_vm(name)
+  apply_provisioner(name, id, pname)
+  mark_applied(name, id, pname)
+  release_lock(name)
+  log("provisioner #{color.bold(pname)} finished")
+end
+
+# ---------------- Main ----------------
+parsed = parse_args(os.args())
+name = parsed.name
+if name == ""
+  name = default_name()
+end
+
+sub = parsed.sub
+if sub == "ls"
+  cmd_ls()
+elsif sub == "du"
+  cmd_du()
+elsif sub == "stop"
+  cmd_stop(name)
+elsif sub == "rm"
+  cmd_rm(name)
+elsif sub == "logs"
+  cmd_logs(name, parsed.rest)
+elsif sub == "id"
+  cmd_id(name)
+elsif sub == "status"
+  cmd_status(name)
+elsif sub == "provision"
+  cmd_provision(name, parsed.prov)
+elsif sub == "provisioners"
+  cmd_provisioners()
+elsif sub == "prune"
+  cmd_prune()
+else
+  cmd_attach(name, parsed.passthrough, parsed.prov, parsed.no_prov)
+end

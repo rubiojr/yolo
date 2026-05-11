@@ -21,7 +21,8 @@ dnf -q install \
     git make gcc gcc-c++ pkgconfig redhat-rpm-config \
     libyaml-devel openssl-devel zlib-devel readline-devel \
     sqlite-devel libxml2-devel libxslt-devel \
-    tar gzip xz which findutils ca-certificates curl-minimal
+    tar gzip xz which findutils ca-certificates curl-minimal \
+    procps-ng net-tools
 
 # ---------------- Ruby ----------------
 if [ -n "$RUBY_VERSION" ]; then

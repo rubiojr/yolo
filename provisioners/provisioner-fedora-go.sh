@@ -39,7 +39,7 @@ fi
 # ---------------- Base tooling ----------------
 dnf -q install \
     tar gzip xz which findutils ca-certificates curl-minimal \
-    git make gcc
+    git make gcc procps-ng net-tools
 
 # ---------------- Install upstream Go ----------------
 [ -d /usr/local/go ] && rm -rf /usr/local/go

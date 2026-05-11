@@ -20,7 +20,7 @@ fi
 dnf -q install \
     curl-minimal ca-certificates git make gcc gcc-c++ \
     pkgconfig openssl-devel \
-    tar gzip xz which findutils
+    tar gzip xz which findutils procps-ng net-tools
 
 # ---------------- rustup + toolchain ----------------
 echo "==> [yolo:fedora-rust] installing rustup (channel: ${CHANNEL})"

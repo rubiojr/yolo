@@ -38,7 +38,7 @@ fi
 # ---------------- Base tools ----------------
 dnf -q install \
     curl-minimal ca-certificates tar gzip xz unzip git make \
-    which findutils
+    which findutils procps-ng net-tools
 
 # ---------------- JDK (Temurin) ----------------
 JDK_PREFIX="/opt/jdk-${JDK_VERSION}"

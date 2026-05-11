@@ -20,7 +20,7 @@ fi
 # ---------------- Base tooling ----------------
 dnf -q install \
     tar gzip xz which findutils ca-certificates curl-minimal \
-    git make gcc
+    git make gcc procps-ng net-tools
 
 # ---------------- Latest Go ----------------
 # https://go.dev/VERSION?m=text → "go1.26.3\ntime ..."

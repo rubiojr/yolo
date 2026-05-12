@@ -70,6 +70,10 @@ AI_AGENTS = {
 DEFAULT_AI_AGENT = "copilot"
 
 # ---------------- Config ----------------
+# Bump this on every release tag (also bumped by hand on `main` after a
+# release so `main` builds advertise a `-dev` suffix).
+VERSION = "0.1.2"
+
 def env_or(name, fallback)
   v = os.getenv(name)
   if v == ""
@@ -618,6 +622,9 @@ def parse_args(args)
     elsif a == "-h" || a == "--help"
       print_help()
       os.exit(0)
+    elsif a == "-V" || a == "--version"
+      print_version()
+      os.exit(0)
     elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners" || a == "export" || a == "import")
       sub = a
     else
@@ -626,6 +633,10 @@ def parse_args(args)
     i = i + 1
   end
   return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb_override}
+end
+
+def print_version
+  puts "yolo #{VERSION}"
 end
 
 def print_help
@@ -643,6 +654,8 @@ def print_help
   puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
   puts "                                  MiB integer. Takes effect when the VM is"
   puts "                                  first created."
+  puts "  yolo -V, --version              Print yolo version and exit."
+  puts "  yolo -h, --help                 Print this help and exit."
   puts "  yolo ls                         List tracked VMs with live status."
   puts "  yolo du                         List tracked VMs with disk usage."
   puts "  yolo stop [-n NAME]             Stop VM."

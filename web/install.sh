@@ -24,8 +24,6 @@ YOLO_VERSION="${YOLO_VERSION:-}"            # empty = latest
 MATCHLOCK_VERSION="${MATCHLOCK_VERSION:-}"  # empty = latest
 YOLO_PREFIX="${YOLO_PREFIX:-$HOME/.local/bin}"
 
-MATCHLOCK_INSTALLER_URL="${MATCHLOCK_INSTALLER_URL:-https://raw.githubusercontent.com/jingkaihe/matchlock/main/scripts/install.sh}"
-
 SKIP_MATCHLOCK=0
 SKIP_DEPS=0
 ALLOW_MISSING_CHECKSUM=0
@@ -140,12 +138,36 @@ fi
 need_cmd curl
 
 # ---------------- Install matchlock ----------------
+# We deliberately don't use matchlock's upstream curl|bash installer here:
+# it uses bash process substitution (`< <(...)`), which fails inside
+# matchlock's own microVMs ("/dev/fd/63: No such file or directory") and
+# also breaks when fed to `bash -s --` from a pipe. Resolving the RPM
+# asset URL directly is simpler and only uses plain pipes anyway.
+matchlock_rpm_url() {
+  local arch="$1" version="${2:-}"
+  local api_url
+
+  if [ -z "$version" ]; then
+    api_url="https://api.github.com/repos/jingkaihe/matchlock/releases/latest"
+  else
+    case "$version" in v*) ;; *) version="v$version" ;; esac
+    api_url="https://api.github.com/repos/jingkaihe/matchlock/releases/tags/$version"
+  fi
+
+  curl -fsSL --proto '=https' --tlsv1.2 "$api_url" \
+    | sed -nE 's/.*"browser_download_url":[[:space:]]*"(https:\/\/[^"]*_linux_'"$arch"'\.rpm)".*/\1/p' \
+    | head -n1
+}
+
 if [ "$SKIP_MATCHLOCK" -eq 0 ]; then
-  log "Installing matchlock via upstream installer"
-  ML_ARGS=()
-  [ -n "$MATCHLOCK_VERSION" ] && ML_ARGS=(--version "$MATCHLOCK_VERSION")
-  # The upstream installer runs `sudo dnf install` internally.
-  curl -fsSL "$MATCHLOCK_INSTALLER_URL" | bash -s -- "${ML_ARGS[@]}"
+  log "Resolving matchlock RPM (${MATCHLOCK_VERSION:-latest}, linux/${ARCH})"
+  ML_RPM_URL="$(matchlock_rpm_url "$ARCH" "$MATCHLOCK_VERSION")" \
+    || die "failed to query GitHub for matchlock releases"
+  [ -n "$ML_RPM_URL" ] || die "no matchlock RPM asset found for linux/${ARCH} in release ${MATCHLOCK_VERSION:-latest}"
+  log "  asset: $ML_RPM_URL"
+
+  log "Installing matchlock via dnf"
+  $SUDO dnf install -y --setopt=install_weak_deps=False "$ML_RPM_URL"
 else
   warn "Skipping matchlock install (--skip-matchlock)"
 fi

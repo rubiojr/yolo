@@ -1055,7 +1055,13 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
   # Only request a PTY (`-t`) when stdin is itself a terminal — same convention
   # docker / podman use. Without this, `yolo -- cmd` from a script, CI job, or
   # SSH session without `-t` fails with `matchlock: -it requires a TTY`.
-  tty_check = try `bash -c "[ -t 0 ] && printf t" 2>/dev/null` or ""
+  # Probe the controlling TTY via </dev/tty rather than the spawned shell's
+  # own stdin: rugo's captured backtick gives the child a non-TTY stdin
+  # (it's a captured-output shell), so `[ -t 0 ]` always reads false even
+  # from an interactive terminal. /dev/tty opens the controlling terminal
+  # directly if there is one, and fails (caught by `try`) when there isn't
+  # (CI, scripted, SSH without a TTY).
+  tty_check = try `bash -c "[ -t 0 ] && printf t" </dev/tty 2>/dev/null` or ""
   it_flag = "-i"
   if str.trim(tty_check) == "t"
     it_flag = "-it"

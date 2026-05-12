@@ -26,6 +26,7 @@ use "crypto"
 use "fmt"
 use "filepath"
 use "conv"
+use "time"
 
 # ---------------- Embedded provisioners ----------------
 # Each provisioner is a plain bash script that runs INSIDE the guest VM as
@@ -160,6 +161,22 @@ def vm_purge(id)
   try `bash -c "matchlock rm   #{id} >/dev/null 2>&1"` or nil
 end
 
+# POSIX shell-quote: wrap in single quotes; escape internal `'` as `'\''`.
+# Lossless under bash word-splitting — the original string round-trips.
+def shell_quote(s)
+  return "'" + str.replace(s, "'", "'\\''") + "'"
+end
+
+# Quote each element of an argv and join with spaces. The result is a bash
+# command line that, when re-parsed by bash, yields the original argv.
+def shell_join(args)
+  parts = []
+  for a in args
+    parts = append(parts, shell_quote(a))
+  end
+  return str.join(parts, " ")
+end
+
 # Start a fresh VM bound to $name. Returns the new vm-id.
 def start_vm(name)
   # Per-name image pin (from `yolo import`) overrides the global default so
@@ -180,6 +197,12 @@ def start_vm(name)
     allow_arg = "--allow-host \"#{ALLOW}\""
   end
   cwd = os.cwd()
+  # --rm=false is required for `matchlock exec` to work afterwards: ephemeral
+  # (`--rm=true`, the default in some matchlock paths) VMs do not create the
+  # exec relay socket, and the next `matchlock exec <id>` errors out with
+  # `exec socket not found for <id> (was it started with --rm=false?)`. `-d`
+  # alone is documented as equivalent in matchlock's README, but we set both
+  # explicitly so we don't depend on that default.
   script = <<~SH
     matchlock run \
       --image "#{img}" \
@@ -192,6 +215,7 @@ def start_vm(name)
       --disk-size #{disk_mb} \
       #{allow_arg} \
       #{user_arg} \
+      --rm=false \
       -d 2>&1
   SH
   out = try os.exec(script) or msg
@@ -224,20 +248,33 @@ def start_vm(name)
   return id
 end
 
-# matchlock run -d returns as soon as the VM's state is "running", but the
-# exec relay socket is created moments later. Wait for it (up to ~3s).
+# matchlock run -d returns as soon as the VM is *registered* in matchlock's
+# state DB (status="running"), but matchlock then continues setting things up
+# in the background — pulling the OCI image on first use, creating the rootfs
+# overlay, booting the Firecracker VM, and finally creating the exec relay
+# socket. Until that socket exists, `matchlock exec <id>` fails with
+# `exec socket not found for <id> (was it started with --rm=false?)`.
+# Wait for the socket to appear before returning. First-boot can take 30s+
+# because of the image pull, so we tolerate a long deadline.
+EXEC_SOCK_TIMEOUT_S = 120
 def wait_exec_ready(id)
   home = os.getenv("HOME")
   sock = "#{home}/.matchlock/vms/#{id}/exec.sock"
-  i = 0
-  while i < 60
+  start = time.now()
+  notified = false
+  while time.now() - start < EXEC_SOCK_TIMEOUT_S
     if os.file_exists(sock)
       return
     end
-    sleep 0.05
-    i = i + 1
+    if !notified && time.now() - start > 3
+      log("waiting for matchlock exec socket (first boot can take a while)…")
+      notified = true
+    end
+    sleep 0.2
   end
-  warn("exec.sock did not appear within 3s for #{id}; trying anyway")
+  err_("exec.sock did not appear within #{EXEC_SOCK_TIMEOUT_S}s for #{id}")
+  err_("matchlock may still be pulling the image or booting; check `matchlock list`")
+  os.exit(1)
 end
 
 def state_file(name)
@@ -1002,11 +1039,40 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
   # already-set-up VM.
   release_lock(name)
 
+  # Only request a PTY (`-t`) when stdin is itself a terminal — same convention
+  # docker / podman use. Without this, `yolo -- cmd` from a script, CI job, or
+  # SSH session without `-t` fails with `matchlock: -it requires a TTY`.
+  tty_check = try `bash -c "[ -t 0 ] && printf t" 2>/dev/null` or ""
+  it_flag = "-i"
+  if str.trim(tty_check) == "t"
+    it_flag = "-it"
+  end
+
   if len(passthrough) == 0
-    bash -c "matchlock exec #{id} -w #{WORKSPACE} -it -- bash -l"
+    bash -c "matchlock exec #{id} -w #{WORKSPACE} #{it_flag} -- bash -l"
   else
-    cmd = str.join(passthrough, " ")
-    bash -c "matchlock exec #{id} -w #{WORKSPACE} -it -- bash -lc '#{cmd}'"
+    # Use the `bash -c 'exec "$@"' bash arg1 arg2 ...` idiom so we only need
+    # *single-level* shell-quoting per arg. Joining args with str.join and
+    # passing the result as a single `bash -lc '<one-string>'` argument loses
+    # argv boundaries — e.g. `yolo -- sh -c "uname -a; echo X"` would collapse
+    # to `sh -c uname -a; echo X` and bash would re-parse it as `sh -c uname`,
+    # then `-a` (ignored), then `echo X` as a separate command.
+    #
+    # The catch: rugo's shell-fallback wraps `bash -c "<str>"` in another
+    # `sh -c` layer, so embedded `$@`, `$$`, `\"` get eaten by that outer
+    # shell before bash sees them. To avoid this nested-quoting hell, we
+    # write the whole invocation to a temp script and exec that script —
+    # the only thing the rugo shell-fallback sees is `bash <tmpfile>`, with
+    # no shell metacharacters in the path.
+    argv = shell_join(passthrough)
+    tmp_script = filepath.join(os.tmp_dir(), "yolo-exec-#{os.pid()}.sh")
+    script_body = <<~SH
+      #!/usr/bin/env bash
+      trap 'rm -f "#{tmp_script}"' EXIT
+      exec matchlock exec #{id} -w #{WORKSPACE} #{it_flag} -- bash -lc 'exec "$@"' bash #{argv}
+    SH
+    os.write_file(tmp_script, script_body)
+    bash -c "bash #{tmp_script}"
   end
 end
 

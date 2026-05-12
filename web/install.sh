@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# install.sh — one-step installer for matchlock + yolo on Fedora.
+# install.sh — one-step installer for matchlock + yolo.
 #
 # Quick install:
-#   curl -fsSL https://raw.githubusercontent.com/rubiojr/yolo/main/web/install.sh | bash
+#   curl -fsSL https://yolo.rbel.co/install.sh | bash
 #
 # Or pin versions:
-#   curl -fsSL https://raw.githubusercontent.com/rubiojr/yolo/main/web/install.sh \
+#   curl -fsSL https://yolo.rbel.co/install.sh \
 #     | bash -s -- --yolo-version v0.1.0 --matchlock-version 0.2.4
 #
+# Supported hosts:
+#   - Fedora (Workstation/Server/Cloud; not Atomic/rpm-ostree variants)
+#   - Ubuntu 26.04 LTS (Resolute Raccoon)
+#
 # What it does:
-#   1. Pre-flight: only Fedora (mutable, dnf-based) is supported.
-#   2. Installs host dependencies (curl, tar) via dnf.
-#   3. Installs matchlock via the upstream installer (RPM from GitHub).
+#   1. Pre-flight: detects Fedora (dnf) or Ubuntu (apt) and refuses anything else.
+#   2. Installs host dependencies (curl, tar, ca-certificates).
+#   3. Installs matchlock from GitHub Releases (.rpm on Fedora, .deb on Ubuntu).
 #   4. Downloads the matching yolo binary from GitHub Releases into
 #      ~/.local/bin (or $YOLO_PREFIX) and verifies its sha256 checksum.
 #   5. Prints next-step hints (matchlock diagnose / setup linux).
@@ -50,7 +54,8 @@ Options:
                                 Default: latest.
   --prefix DIR                  Install yolo into DIR (default: ~/.local/bin).
   --skip-matchlock              Skip installing matchlock (assume already present).
-  --skip-deps                   Skip dnf install of host build/runtime deps.
+  --skip-deps                   Skip the host package-manager install of
+                                build/runtime deps (curl, tar, ca-certificates).
   --allow-missing-checksum      Don't fail if the release lacks a .sha256 sidecar
                                 (useful for forks / dev releases — discouraged).
   -h, --help                    Show this help.
@@ -81,26 +86,43 @@ while [ "$#" -gt 0 ]; do
 done
 
 # ---------------- Pre-flight: OS ----------------
-log "Pre-flight: checking that this is a Fedora host"
-[ -r /etc/os-release ] || die "/etc/os-release not found; this installer supports Fedora only."
+log "Pre-flight: checking host OS"
+[ -r /etc/os-release ] || die "/etc/os-release not found; cannot identify host."
 # shellcheck disable=SC1091
 . /etc/os-release
-if [ "${ID:-}" != "fedora" ]; then
-  die "Unsupported distribution: ${PRETTY_NAME:-${ID:-unknown}}. This installer supports Fedora only."
-fi
 
-# Fedora Atomic variants (Silverblue, Kinoite, CoreOS, IoT, …) layer packages
-# via rpm-ostree rather than dnf. The matchlock RPM installer assumes a mutable
-# dnf host, so we hard-fail here with a clear pointer rather than half-install.
-case "${VARIANT_ID:-}" in
-  silverblue|kinoite|sericea|onyx|coreos|iot|atomic)
-    die "Detected Fedora Atomic variant '${VARIANT_ID}'. This installer requires a mutable dnf host. Layer matchlock with 'rpm-ostree install' manually or use the Fedora Workstation/Server/Cloud editions."
+case "${ID:-}" in
+  fedora)
+    DISTRO="fedora"
+    # Fedora Atomic variants (Silverblue, Kinoite, CoreOS, IoT, …) layer packages
+    # via rpm-ostree rather than dnf. The matchlock RPM install assumes a mutable
+    # dnf host, so we hard-fail here with a clear pointer rather than half-install.
+    case "${VARIANT_ID:-}" in
+      silverblue|kinoite|sericea|onyx|coreos|iot|atomic)
+        die "Detected Fedora Atomic variant '${VARIANT_ID}'. This installer requires a mutable dnf host. Layer matchlock with 'rpm-ostree install' manually or use the Fedora Workstation/Server/Cloud editions."
+        ;;
+    esac
+    if command -v rpm-ostree >/dev/null 2>&1 && ! command -v dnf >/dev/null 2>&1; then
+      die "rpm-ostree detected without dnf — this installer requires a mutable Fedora host."
+    fi
+    ;;
+  ubuntu)
+    DISTRO="ubuntu"
+    # Ubuntu Core (snap-only, immutable) reports ID=ubuntu-core, so it never
+    # reaches this branch. WSL Ubuntu is identified as plain ubuntu and is fine
+    # — matchlock won't work there in practice (no /dev/kvm), but install will
+    # succeed and `matchlock diagnose` will explain. Hard requirements:
+    command -v apt-get >/dev/null 2>&1 || die "apt-get not found on this Ubuntu host."
+    command -v dpkg    >/dev/null 2>&1 || die "dpkg not found — needed to install matchlock .deb."
+    if [ "${VERSION_ID:-}" != "26.04" ]; then
+      warn "Ubuntu ${VERSION_ID:-?} detected; only 26.04 LTS is officially tested. Continuing anyway."
+    fi
+    ;;
+  *)
+    die "Unsupported distribution: ${PRETTY_NAME:-${ID:-unknown}}. Supported: Fedora (mutable) and Ubuntu 26.04 LTS."
     ;;
 esac
-if command -v rpm-ostree >/dev/null 2>&1 && ! command -v dnf >/dev/null 2>&1; then
-  die "rpm-ostree detected without dnf — this installer requires a mutable Fedora host."
-fi
-log "  detected: ${PRETTY_NAME:-Fedora}${VARIANT_ID:+ (${VARIANT_ID})}"
+log "  detected: ${PRETTY_NAME:-$ID}${VARIANT_ID:+ (${VARIANT_ID})}"
 
 # ---------------- Pre-flight: arch ----------------
 case "$(uname -m)" in
@@ -128,9 +150,21 @@ fi
 
 # ---------------- Install host deps ----------------
 if [ "$SKIP_DEPS" -eq 0 ]; then
-  log "Installing host dependencies via dnf (curl, tar, ca-certificates)"
-  $SUDO dnf install -y --setopt=install_weak_deps=False \
-    curl tar ca-certificates
+  log "Installing host dependencies (curl, tar, ca-certificates)"
+  case "$DISTRO" in
+    fedora)
+      $SUDO dnf install -y --setopt=install_weak_deps=False \
+        curl tar ca-certificates
+      ;;
+    ubuntu)
+      # apt-get update can race with cloud-init's apt phase on freshly-booted
+      # cloud images; the verify script gates on `cloud-init status --wait`
+      # before invoking us. Plain `apt-get` is fine on already-settled hosts.
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends curl tar ca-certificates
+      ;;
+  esac
 else
   warn "Skipping host dependency install (--skip-deps)"
 fi
@@ -141,10 +175,10 @@ need_cmd curl
 # We deliberately don't use matchlock's upstream curl|bash installer here:
 # it uses bash process substitution (`< <(...)`), which fails inside
 # matchlock's own microVMs ("/dev/fd/63: No such file or directory") and
-# also breaks when fed to `bash -s --` from a pipe. Resolving the RPM
+# also breaks when fed to `bash -s --` from a pipe. Resolving the package
 # asset URL directly is simpler and only uses plain pipes anyway.
-matchlock_rpm_url() {
-  local arch="$1" version="${2:-}"
+matchlock_asset_url() {
+  local arch="$1" version="${2:-}" ext="$3"
   local api_url
 
   if [ -z "$version" ]; then
@@ -154,20 +188,48 @@ matchlock_rpm_url() {
     api_url="https://api.github.com/repos/jingkaihe/matchlock/releases/tags/$version"
   fi
 
-  curl -fsSL --proto '=https' --tlsv1.2 "$api_url" \
-    | sed -nE 's/.*"browser_download_url":[[:space:]]*"(https:\/\/[^"]*_linux_'"$arch"'\.rpm)".*/\1/p' \
+  # Use retries so a transient DNS / TCP blip during cloud-init or first-boot
+  # network setup doesn't fail the whole install.
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+    "$api_url" \
+    | sed -nE "s/.*\"browser_download_url\":[[:space:]]*\"(https:\/\/[^\"]*_linux_${arch}\.${ext})\".*/\1/p" \
     | head -n1
 }
 
 if [ "$SKIP_MATCHLOCK" -eq 0 ]; then
-  log "Resolving matchlock RPM (${MATCHLOCK_VERSION:-latest}, linux/${ARCH})"
-  ML_RPM_URL="$(matchlock_rpm_url "$ARCH" "$MATCHLOCK_VERSION")" \
+  case "$DISTRO" in
+    fedora) ML_EXT="rpm" ;;
+    ubuntu) ML_EXT="deb" ;;
+  esac
+  log "Resolving matchlock ${ML_EXT} (${MATCHLOCK_VERSION:-latest}, linux/${ARCH})"
+  ML_PKG_URL="$(matchlock_asset_url "$ARCH" "$MATCHLOCK_VERSION" "$ML_EXT")" \
     || die "failed to query GitHub for matchlock releases"
-  [ -n "$ML_RPM_URL" ] || die "no matchlock RPM asset found for linux/${ARCH} in release ${MATCHLOCK_VERSION:-latest}"
-  log "  asset: $ML_RPM_URL"
+  [ -n "$ML_PKG_URL" ] || die "no matchlock .${ML_EXT} asset found for linux/${ARCH} in release ${MATCHLOCK_VERSION:-latest}"
+  log "  asset: $ML_PKG_URL"
 
-  log "Installing matchlock via dnf"
-  $SUDO dnf install -y --setopt=install_weak_deps=False "$ML_RPM_URL"
+  case "$DISTRO" in
+    fedora)
+      log "Installing matchlock via dnf"
+      $SUDO dnf install -y --setopt=install_weak_deps=False "$ML_PKG_URL"
+      ;;
+    ubuntu)
+      # apt-get install accepts a local path that starts with `./` or `/` and
+      # ends in `.deb`, and will resolve dependencies from the apt repos. We
+      # download the deb to a temp dir first so apt has a stable filename.
+      log "Downloading matchlock .deb"
+      ML_DEB_DIR="$(mktemp -d)"
+      ML_DEB="$ML_DEB_DIR/matchlock.deb"
+      curl -fL --proto '=https' --tlsv1.2 \
+        --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+        -o "$ML_DEB" "$ML_PKG_URL" \
+        || { rm -rf "$ML_DEB_DIR"; die "failed to download $ML_PKG_URL"; }
+      log "Installing matchlock via apt-get"
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends "$ML_DEB"
+      rm -rf "$ML_DEB_DIR"
+      ;;
+  esac
 else
   warn "Skipping matchlock install (--skip-matchlock)"
 fi
@@ -196,7 +258,9 @@ mkdir -p "$YOLO_PREFIX"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-if ! curl -fL --proto '=https' --tlsv1.2 -o "$TMP/$YOLO_ASSET" "$YOLO_URL"; then
+if ! curl -fL --proto '=https' --tlsv1.2 \
+      --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+      -o "$TMP/$YOLO_ASSET" "$YOLO_URL"; then
   die "failed to download $YOLO_URL — does a release exist for ${YOLO_LABEL}?"
 fi
 

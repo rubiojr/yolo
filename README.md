@@ -134,6 +134,10 @@ yolo -n web
 # Tear it down when done
 yolo stop          # stops, state preserved
 yolo rm            # nukes the VM and removes the name binding
+
+# Override the rootfs disk size for this run (applies when the VM is first
+# created — accepts 32G/32g/512M/512m or a bare MiB integer).
+yolo --disk-size 64G
 ```
 
 ## Configuration (env vars)
@@ -143,7 +147,7 @@ yolo rm            # nukes the VM and removes the name binding
 | `YOLO_IMAGE`      | `fedora:44`    | OCI image to use (any matchlock-supported reference) |
 | `YOLO_CPUS`       | `2`            | vCPU count (matchlock's stock default is 1) |
 | `YOLO_MEM_MB`     | `2048`         | Guest memory in MiB (matchlock's stock default is 512) |
-| `YOLO_DISK_MB`    | `16384`        | Guest rootfs disk in MiB (16 GiB). **Matchlock's stock default is 5120 MiB which fills up during a Go-toolchain provision.** Lower it for cheap one-offs, raise it for heavier workloads. |
+| `YOLO_DISK_MB`    | `32768`        | Guest rootfs disk in MiB (32 GiB). Also settable per-invocation with `--disk-size 32G` (see below). **Matchlock's stock default is 5120 MiB which fills up during a Go-toolchain provision.** Lower it for cheap one-offs, raise it for heavier workloads. |
 | `YOLO_WORKSPACE`  | `/work`        | Guest mount point for `$PWD` |
 | `YOLO_NAME`       | `cwd-<sha1>`   | Override the auto-derived name |
 | `YOLO_USER`       | unset          | Pass `--user uid:gid` to matchlock for non-root execution |
@@ -155,10 +159,15 @@ yolo rm            # nukes the VM and removes the name binding
 
 - The `fedora-go` provisioner needs **~10 GiB** of disk at peak: ~600 MB for
   the dnf base, ~200 MB for the Go tarball, plus build caches for `gopls`,
-  `golangci-lint`, `dlv`, etc. The 16 GiB default leaves comfortable headroom.
+  `golangci-lint`, `dlv`, etc. The 32 GiB default leaves comfortable headroom.
 - Bumping memory above 2 GiB mostly helps `go install` of larger projects.
 - For a tighter footprint, e.g. ephemeral one-shot runs: `YOLO_DISK_MB=4096
   YOLO_MEM_MB=512 yolo --no-provision -- script.sh`.
+- The `--disk-size SIZE` flag overrides `YOLO_DISK_MB` for a single run.
+  Accepts `32G`, `32g`, `512M`, `512m` (case-insensitive, optional trailing
+  `B`/`b`), or a bare MiB integer. It only takes effect when the VM is first
+  created — re-running `yolo --disk-size …` against an existing VM does not
+  resize the rootfs.
 
 ## State files
 

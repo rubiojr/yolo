@@ -90,10 +90,15 @@ WORKSPACE = env_or("YOLO_WORKSPACE", "/work")
 # runs out of disk and is painfully slow. Override per env var if needed.
 CPUS      = env_or("YOLO_CPUS",      "2")
 MEM_MB    = env_or("YOLO_MEM_MB",    "2048")
-DISK_MB   = env_or("YOLO_DISK_MB",   "16384")
+DISK_MB   = env_or("YOLO_DISK_MB",   "32768")
 RUNTIME   = env_or("XDG_RUNTIME_DIR", "/tmp")
 STATE_DIR = filepath.join(RUNTIME, "yolo")
 USER_FLAG = env_or("YOLO_USER", "")
+
+# Mutable per-invocation override for the disk size. Initialized to the
+# env-var-or-default constant; `--disk-size` (parsed in parse_args) replaces
+# this in main before any VM is started.
+disk_mb = DISK_MB
 
 mkdir -p "#{STATE_DIR}"
 
@@ -180,7 +185,7 @@ def start_vm(name)
       --hostname "#{name}" \
       --cpus #{CPUS} \
       --memory #{MEM_MB} \
-      --disk-size #{DISK_MB} \
+      --disk-size #{disk_mb} \
       #{allow_arg} \
       #{user_arg} \
       -d 2>&1
@@ -464,6 +469,41 @@ def ensure_vm(name)
 end
 
 # ---------------- Arg parsing ----------------
+# Parse a human disk size like "32G", "32g", "32M", "32m" (with optional
+# trailing "B"/"b" — so "32gb" / "32mb" also work), or a bare integer
+# interpreted as MiB (e.g. "16384") for parity with $YOLO_DISK_MB. Returns
+# the size as a MiB integer string, or "" if the input can't be parsed.
+def parse_disk_size(s)
+  if s == ""
+    return ""
+  end
+  lower = str.lower(s)
+  if str.ends_with(lower, "b")
+    lower = str.slice(lower, 0, len(lower) - 1)
+  end
+  multiplier = 1
+  unit_len = 0
+  if str.ends_with(lower, "g")
+    multiplier = 1024
+    unit_len = 1
+  elsif str.ends_with(lower, "m")
+    multiplier = 1
+    unit_len = 1
+  end
+  num_str = lower
+  if unit_len > 0
+    num_str = str.slice(lower, 0, len(lower) - unit_len)
+  end
+  if num_str == ""
+    return ""
+  end
+  n = try conv.to_i(num_str) or -1
+  if n <= 0
+    return ""
+  end
+  return conv.to_s(n * multiplier)
+end
+
 # Parse a flat argv into: subcommand, -n name, --provisioner, --ai-agent,
 # rest, -- passthrough.
 def parse_args(args)
@@ -478,6 +518,7 @@ def parse_args(args)
   in_passthrough = false
   out_path = ""
   force = false
+  disk_mb_override = ""
   i = 0
   while i < len(args)
     a = args[i]
@@ -498,6 +539,18 @@ def parse_args(args)
       out_path = args[i]
     elsif a == "--force"
       force = true
+    elsif a == "--disk-size"
+      i = i + 1
+      if i >= len(args)
+        err_("--disk-size requires a value (e.g. 32G, 512M, or a bare MiB integer)")
+        os.exit(2)
+      end
+      parsed_sz = parse_disk_size(args[i])
+      if parsed_sz == ""
+        err_("invalid --disk-size value: '#{args[i]}' (expected e.g. 32G, 32g, 512M, 512m, or a bare MiB integer)")
+        os.exit(2)
+      end
+      disk_mb_override = parsed_sz
     elsif a == "--ai-agent"
       # Optional value: if the next arg exists and isn't another flag /
       # subcommand, consume it as the agent name; otherwise default.
@@ -531,7 +584,7 @@ def parse_args(args)
     end
     i = i + 1
   end
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force}
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb_override}
 end
 
 def print_help
@@ -545,6 +598,10 @@ def print_help
   puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: copilot)."
   puts "                                  Known agents: copilot, opencode."
   puts "  yolo -n NAME [...]              Use a named VM."
+  puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."
+  puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
+  puts "                                  MiB integer. Takes effect when the VM is"
+  puts "                                  first created."
   puts "  yolo ls                         List tracked VMs with live status."
   puts "  yolo du                         List tracked VMs with disk usage."
   puts "  yolo stop [-n NAME]             Stop VM."
@@ -582,7 +639,7 @@ def print_help
   puts "  YOLO_IMAGE=fedora:44       OCI image"
   puts "  YOLO_CPUS=2                vCPU count"
   puts "  YOLO_MEM_MB=2048           Memory (MiB)"
-  puts "  YOLO_DISK_MB=16384         Rootfs disk (MiB)"
+  puts "  YOLO_DISK_MB=32768         Rootfs disk (MiB)"
   puts "  YOLO_WORKSPACE=/work       Guest mount point for $PWD"
   puts "  YOLO_ALLOW=                Comma list of allow-listed hosts (enables MITM)"
   puts "  YOLO_USER=                 Run as uid:gid inside guest"
@@ -1297,7 +1354,7 @@ def cmd_export(name, out_path)
     "  \"workspace\": \"#{json_escape(WORKSPACE)}\",\n" +
     "  \"cpus\": \"#{json_escape(CPUS)}\",\n" +
     "  \"mem_mb\": \"#{json_escape(MEM_MB)}\",\n" +
-    "  \"disk_mb\": \"#{json_escape(DISK_MB)}\",\n" +
+    "  \"disk_mb\": \"#{json_escape(disk_mb)}\",\n" +
     "  \"has_yolofile\": #{has_yolofile},\n" +
     "  \"applied\": #{applied_json}\n" +
     "}\n"
@@ -1545,6 +1602,9 @@ end
 
 # ---------------- Main ----------------
 parsed = parse_args(os.args())
+if parsed.disk_mb != ""
+  disk_mb = parsed.disk_mb
+end
 name = parsed.name
 if name == ""
   name = default_name()

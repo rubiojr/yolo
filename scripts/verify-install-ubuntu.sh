@@ -360,7 +360,33 @@ if [ "$NESTED_YOLO" -eq 1 ]; then
     YOLO=$HOME/.local/bin/yolo
     cleanup() { (cd /tmp/yolo-nested && "$YOLO" rm) >/dev/null 2>&1 || true; }
     trap cleanup EXIT
+
+    echo "=== passthrough: yolo -- sh -c ... ==="
     "$YOLO" --no-provision -- sh -c "uname -a; echo NESTED_OK_$$"
+
+    echo "=== interactive: yolo (PTY via util-linux script) ==="
+    # The plain passthrough test above runs a self-contained command and
+    # exits regardless of whether matchlock got -t, so it cannot catch
+    # regressions in the interactive attach path (e.g. a broken tty_check
+    # routing yolo to "-i" only, which leaves in-guest bash without a PTY
+    # and produces no prompt — a silent hang for a real user).
+    #
+    # `script` from util-linux allocates a fresh PTY, so yolo'\''s tty_check
+    # (which probes /dev/tty) sees a controlling terminal and passes -t to
+    # matchlock. matchlock then allocates an in-guest PTY, so the in-guest
+    # bash echoes typed input back through the PTY. We assert on that echo:
+    # the command "uname -s" must appear in the captured output (echoed
+    # input), in addition to its output "Linux". Without an in-guest PTY,
+    # only "Linux" would appear.
+    cat > /tmp/yolo-inter.sh <<EOSH
+#!/bin/bash
+set -e
+cd /tmp/yolo-nested
+printf "%s\n" "uname -s" "echo INTERACTIVE_OK_$$" exit | "$YOLO" --no-provision
+EOSH
+    chmod +x /tmp/yolo-inter.sh
+    timeout 120 script -qfec "bash /tmp/yolo-inter.sh" /dev/null
+    echo "=== interactive done ==="
   ' 2>&1 | tee "$nested_out_file"; then
     die "nested yolo smoke test failed (see output above)"
   fi
@@ -369,7 +395,14 @@ if [ "$NESTED_YOLO" -eq 1 ]; then
     || die "nested yolo did not produce a Linux uname line"
   echo "$nested_out" | grep -q '^NESTED_OK_' \
     || die "nested yolo command did not run to completion"
-  log "  nested yolo microVM ran successfully"
+  # Interactive attach: command output must appear (sanity), AND the typed
+  # input must be echoed back (proof that in-guest bash got a PTY, i.e.
+  # -t was negotiated all the way through yolo → matchlock → in-guest).
+  echo "$nested_out" | grep -q '^INTERACTIVE_OK_' \
+    || die "interactive yolo attach: piped commands did not produce output"
+  echo "$nested_out" | grep -q 'uname -s' \
+    || die "interactive yolo attach: typed command not echoed — in-guest bash has no PTY (tty_check / -t negotiation broken)"
+  log "  nested yolo microVM ran successfully (passthrough + interactive)"
 else
   log "Skipping nested yolo smoke test (--no-nested-yolo)"
 fi

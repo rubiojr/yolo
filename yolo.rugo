@@ -640,7 +640,7 @@ def print_help
   puts "  automatically re-provisions (content-hashed for the marker)."
   puts "  May begin with a YAML-style '---' front matter block declaring"
   puts "  VM-creation overrides (image, cpus, memory, disk-size). See"
-  puts "  docs/yolofile.md for the full format."
+  puts "  docs/05-yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image"
@@ -1055,7 +1055,7 @@ end
 # instead of the embedded default. The marker key includes a sha256 of the
 # bash body (excluding any leading front matter) so editing the script
 # triggers a re-provision on the next attach. Editing only the front matter
-# does NOT re-provision — see docs/yolofile.md for the full contract.
+# does NOT re-provision — see docs/05-yolofile.md for the full contract.
 
 YOLOFILE = "Yolofile"
 

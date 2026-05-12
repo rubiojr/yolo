@@ -1,22 +1,15 @@
 # yolo
 
-> Fast, persistent, per-directory [matchlock][matchlock] microVMs with one-shot
-> provisioning. Written in [rugo][rugo].
+> Fast, persistent, per-directory [matchlock][matchlock] microVMs with
+> one-shot provisioning. Written in [rugo][rugo].
 
 [matchlock]: https://github.com/jingkaihe/matchlock
 [rugo]: https://github.com/rubiojr/rugo
-
-`yolo` wraps `matchlock` so you can drop into an isolated Fedora microVM for
-the current directory with a single keystroke. The VM persists across
-invocations, the directory you started in is live-mounted as `/work`, and a
-provisioner installs your toolchain the first time you attach. Re-running
-`yolo` is sub-second after the first time.
 
 ```
 ~/code/my-project
 ❯ yolo
 [yolo] starting fedora:44 VM cwd-7259073de3 for /home/rubiojr/code/my-project
-[yolo] rendering provisioner fedora-go
 [yolo] applying fedora-go to vm-b1e68449
 ==> [yolo:fedora-go] installing Go 1.26.3 (amd64)
 …
@@ -29,349 +22,86 @@ go version go1.26.3 linux/amd64
 [root@cwd-7259073de3 work]#
 ```
 
-## Why
+## Features
 
-[matchlock][matchlock] is a great primitive — Firecracker microVMs you can
-spin up from any OCI image, with vsock-based exec, FUSE-mounted workspaces,
-and per-VM network policy. But out of the box you manage every VM by hand
-(`matchlock run -d` → copy the `vm-xxxxxxxx` ID → `matchlock exec vm-…`).
-
-`yolo` adds:
-
-- **Per-directory persistence** — each `$PWD` gets its own long-lived VM,
-  keyed by a sha1 of the path. Re-running `yolo` reattaches in <1s.
-- **Auto-heal** — if the VM was stopped or removed (host reboot, manual
-  `matchlock rm`, etc.), `yolo` notices and recreates it transparently.
-- **One-shot provisioning** — bash provisioners are compiled into the
-  binary, rendered on first attach, idempotently skipped thereafter, and
-  invalidated automatically when the VM is recreated.
-- **Naming** — matchlock has no `--name` of its own; `yolo` maintains a
-  name → vm-id map in `$XDG_RUNTIME_DIR/yolo/`.
-- **Working directory in the VM** — `$PWD` is mounted as `/work` (live
-  read-write) and your shell lands there.
-- **No-fuss network defaults** — plain NAT by default (so `dnf install`,
-  `curl https://…`, `go install` etc. just work). Opt into matchlock's MITM
-  allow-list policy with `YOLO_ALLOW=…`.
+- **Per-directory persistent microVMs.** Each `$PWD` gets its own
+  long-lived Firecracker VM, keyed by a sha1 of the path. Re-running
+  `yolo` reattaches in under a second.
+- **Auto-heal.** If the VM was stopped or removed (host reboot, manual
+  `matchlock rm`, …) `yolo` notices and recreates it transparently.
+- **Auto-detected provisioning.** `yolo` sniffs your project for
+  `go.mod` / `Cargo.toml` / `Gemfile` / `build.gradle` and applies a
+  matching built-in provisioner. Project-specific tooling lives in an
+  optional [`Yolofile`](./docs/05-yolofile.md).
+- **Named VMs.** Run several persistent VMs side-by-side with `-n NAME`.
+- **Your code is mounted live.** `$PWD` shows up inside the guest as
+  `/work` (read-write), so edits on either side are immediately
+  visible on the other.
+- **Snapshot & share.** `yolo export` / `yolo import` move a fully
+  provisioned VM between hosts.
+- **Sensible network defaults.** Plain NAT by default with real
+  upstream TLS, so `dnf install`, `curl https://…`, `go install`, and
+  `git clone` just work. Opt into matchlock's allow-list MITM policy
+  via `YOLO_ALLOW=…`.
 
 ## Requirements
 
 - Linux with KVM (`/dev/kvm` readable and writable)
-- [`matchlock`][matchlock-install] in `PATH`
-- For end users: just the prebuilt `yolo` binary (~2 MB static, no other
-  runtime deps — provisioners run as plain bash inside the guest VM).
-- For building from source: [`rugo`][rugo-install].
-
-[matchlock-install]: https://github.com/jingkaihe/matchlock#install
-[rugo-install]: https://github.com/rubiojr/rugo#install
+- [`matchlock`](https://github.com/jingkaihe/matchlock#install) on `PATH`
+- For end users: just the prebuilt `yolo` binary (~2 MB static; no
+  other runtime deps — provisioners are plain bash run inside the
+  guest).
+- For building from source: [`rugo`](https://github.com/rubiojr/rugo#install).
 
 ## Install
 
-End users:
-
 ```bash
-# Drop the prebuilt static binary on your PATH.
+# Prebuilt binary
 install -m 0755 yolo ~/.local/bin/yolo
-```
 
-From source:
-
-```bash
-# Build the static binary
+# From source
 rugo build yolo.rugo
 install -m 0755 yolo ~/.local/bin/yolo
-
-# Or run unbuilt (slower startup; useful while hacking on yolo itself)
-rugo run yolo.rugo …
 ```
 
-## Usage
-
-```
-yolo                            Ensure VM, auto-provision (once), shell in.
-yolo -- CMD ARGS...             Run CMD inside the VM.
-yolo --provisioner NAME [...]   Use a different provisioner (default: fedora-go).
-yolo --no-provision [...]       Skip auto-provisioning.
-yolo -n NAME [...]              Use a named VM instead of the per-CWD one.
-
-yolo ls                         List tracked VMs with live status.
-yolo status [-n NAME]           Print state + vm-id + applied provisioners.
-yolo id     [-n NAME]           Print the vm-id (scriptable).
-yolo logs   [-n NAME]           Tail the VM's serial log.
-
-yolo stop   [-n NAME]           Stop the VM (preserves state).
-yolo rm     [-n NAME]           Stop + remove the VM and its name binding.
-yolo prune                      Drop name bindings whose VM is gone.
-
-yolo provision [--provisioner NAME] [-n NAME]
-                                Force re-apply a provisioner (idempotent).
-yolo provisioners               List embedded provisioners.
-
-yolo export [-n NAME] [-o FILE] Snapshot the VM's current rootfs and yolo
-                                state into a single .tar.gz bundle.
-yolo import FILE [-n NAME] [--force]
-                                Import a bundle on another host; pins a
-                                local matchlock image so the next
-                                `yolo -n NAME` boots from the captured
-                                rootfs with provisioners already applied.
-```
-
-### Common flows
+## Basic usage
 
 ```bash
-# Drop into a fresh fedora:44 VM with Go installed and your CWD mounted
+# Interactive shell in this directory's VM (creates it the first time)
 yolo
 
-# Run one command without an interactive shell
+# Run a single command inside the VM
 yolo -- go test ./...
 
-# Use a different image
-YOLO_IMAGE=registry.fedoraproject.org/fedora:41 yolo
+# Open a separate persistent named VM
+yolo -n notes
 
-# Open a separate persistent VM under a name
-yolo -n api
-yolo -n web
-
-# Tear it down when done
-yolo stop          # stops, state preserved
-yolo rm            # nukes the VM and removes the name binding
-
-# Override the rootfs disk size for this run (applies when the VM is first
-# created — accepts 32G/32g/512M/512m or a bare MiB integer).
-yolo --disk-size 64G
-```
-
-## Configuration (env vars)
-
-| Var               | Default        | Effect |
-| ----------------- | -------------- | ------ |
-| `YOLO_IMAGE`      | `fedora:44`    | OCI image to use (any matchlock-supported reference) |
-| `YOLO_CPUS`       | `2`            | vCPU count (matchlock's stock default is 1) |
-| `YOLO_MEM_MB`     | `2048`         | Guest memory in MiB (matchlock's stock default is 512) |
-| `YOLO_DISK_MB`    | `32768`        | Guest rootfs disk in MiB (32 GiB). Also settable per-invocation with `--disk-size 32G` (see below). **Matchlock's stock default is 5120 MiB which fills up during a Go-toolchain provision.** Lower it for cheap one-offs, raise it for heavier workloads. |
-| `YOLO_WORKSPACE`  | `/work`        | Guest mount point for `$PWD` |
-| `YOLO_NAME`       | `cwd-<sha1>`   | Override the auto-derived name |
-| `YOLO_USER`       | unset          | Pass `--user uid:gid` to matchlock for non-root execution |
-| `YOLO_ALLOW`      | unset (no MITM)| Comma list of allow-listed hosts. **Setting this enables matchlock's MITM proxy, which breaks TLS verification inside the guest** (matchlock generates an ephemeral per-VM CA and does not inject it into the guest's trust store). Useful only when you bake a custom image whose tools don't verify certs, or for HTTP-only flows. |
-| `YOLO_GO_VERSION` | _latest_       | Pin the Go version in the `fedora-go` provisioner. By default the provisioner resolves `https://go.dev/VERSION?m=text`. |
-| `XDG_RUNTIME_DIR` | `/tmp`         | Where `yolo` keeps its name → vm-id state files. |
-
-### Sizing notes
-
-- The `fedora-go` provisioner needs **~10 GiB** of disk at peak: ~600 MB for
-  the dnf base, ~200 MB for the Go tarball, plus build caches for `gopls`,
-  `golangci-lint`, `dlv`, etc. The 32 GiB default leaves comfortable headroom.
-- Bumping memory above 2 GiB mostly helps `go install` of larger projects.
-- For a tighter footprint, e.g. ephemeral one-shot runs: `YOLO_DISK_MB=4096
-  YOLO_MEM_MB=512 yolo --no-provision -- script.sh`.
-- The `--disk-size SIZE` flag overrides `YOLO_DISK_MB` for a single run.
-  Accepts `32G`, `32g`, `512M`, `512m` (case-insensitive, optional trailing
-  `B`/`b`), or a bare MiB integer. It only takes effect when the VM is first
-  created — re-running `yolo --disk-size …` against an existing VM does not
-  resize the rootfs.
-
-## State files
-
-`yolo` keeps a tiny per-name state in `$XDG_RUNTIME_DIR/yolo/`:
-
-```
-<name>.vmid     # the matchlock vm-id currently bound to this name
-<name>.applied  # vm-id + list of provisioners already applied to it
-```
-
-The `.applied` marker contains the vm-id on the first line and applied
-provisioner names on subsequent lines, e.g.:
-
-```
-vm-b1e68449
-fedora-go
-```
-
-When the VM is recreated under a new vm-id (auto-heal), the marker is
-implicitly invalidated and the provisioner re-runs.
-
-## Provisioners
-
-Provisioners live in [`provisioners/`](./provisioners) as **plain bash
-scripts**, embedded into the binary at compile time via rugo's `embed`
-directive. yolo pipes the script into `matchlock exec <vm> -i -u root --
-bash`, so it runs as root inside the VM with stdio streamed back to your
-terminal.
-
-No language runtime is needed inside the guest beyond `bash` itself —
-everything compiled, no rugo, no Go.
-
-### Built-in provisioners
-
-| Name        | What it installs |
-| ----------- | ---------------- |
-| `fedora-go` | Upstream Go (latest from go.dev, or `$YOLO_GO_VERSION`), plus `gopls`, `staticcheck`, `dlv`, `goimports`, `gofumpt`, `golangci-lint`. Targets Fedora-based images. |
-
-```bash
-yolo provisioners
-# Available provisioners (default: fedora-go):
-# * fedora-go
-```
-
-### Adding a new provisioner
-
-1. Drop a bash script at `provisioners/provisioner-<name>.sh`:
-
-   ```bash
-   #!/usr/bin/env bash
-   # provisioners/provisioner-fedora-node.sh
-   set -euo pipefail
-   NODE_VER="${YOLO_NODE_VERSION:-22}"
-   dnf -y install "nodejs${NODE_VER}" npm
-   corepack enable
-   echo "node $(node --version), pnpm $(pnpm --version)"
-   ```
-
-2. Register it in `yolo.rugo`:
-
-   ```ruby
-   embed "provisioners/provisioner-fedora-node.sh" as prov_fedora_node
-   PROVISIONERS = {
-     "fedora-go"   => prov_fedora_go,
-     "fedora-node" => prov_fedora_node
-   }
-   ```
-
-3. Rebuild: `rugo build yolo.rugo`. The script is now baked into the binary.
-
-### Testing a provisioner without a VM
-
-Provisioners are plain bash. Run one in any VM/container:
-
-```bash
-docker run --rm -it -v $PWD/provisioners:/p fedora:44 bash /p/provisioner-fedora-go.sh
-```
-
-Or simply `shellcheck provisioners/*.sh` to lint.
-
-### Yolofile (per-project provisioner)
-
-For project-specific tooling, drop a `Yolofile` in the project root. If
-present, `yolo` uses it as the default provisioner instead of
-`fedora-go`. The Yolofile is a **plain bash script** that runs as root
-inside the VM.
-
-```bash
-# ~/code/my-rust-project/Yolofile
-#!/usr/bin/env bash
-set -euo pipefail
-
-CHANNEL="${YOLO_RUST_CHANNEL:-stable}"
-
-dnf -y install make gcc openssl-devel pkgconfig
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-  | sh -s -- -y --default-toolchain "$CHANNEL" --profile minimal
-
-cat > /etc/profile.d/cargo.sh <<'P'
-export PATH=$HOME/.cargo/bin:$PATH
-P
-
-source /root/.cargo/env
-cargo install --locked cargo-watch cargo-edit cargo-nextest
-echo "ready: $(rustc --version)"
-```
-
-Then in that directory:
-
-```bash
-yolo                 # boots fedora:44, runs the Yolofile, drops you into bash
-yolo provisioners
-# Available provisioners (default: Yolofile (/home/me/code/my-rust-project/Yolofile)):
-#   fedora-go
-# * yolofile  (/home/me/code/my-rust-project/Yolofile)
-```
-
-The marker name yolo stores is `yolofile:<sha256-prefix>` of the file content
-— **editing the Yolofile invalidates the marker automatically**, so the next
-`yolo` re-provisions without you needing `--force` or `yolo provision`. The
-state file looks like:
-
-```
-$ cat $XDG_RUNTIME_DIR/yolo/<name>.applied
-vm-b1e68449
-yolofile:2ade95cded20
-```
-
-Override or skip the Yolofile when needed:
-
-```bash
-yolo --provisioner fedora-go   # ignore Yolofile, use the embedded fedora-go
-yolo --no-provision            # ignore everything, just attach
-```
-
-## Networking
-
-By default, `yolo` starts VMs **without** matchlock's `--allow-host` flag,
-which leaves matchlock in plain-NAT mode. The guest gets working outbound
-TCP/UDP with real upstream TLS certs — `dnf install`, `curl https://…`,
-`go install …`, `git clone https://github.com/…` all work normally.
-
-Setting `YOLO_ALLOW="…"` switches matchlock into its MITM interception
-mode, restricts egress to the listed hosts, and replaces every TLS cert
-chain with matchlock's ephemeral per-VM CA. **The guest does not trust
-this CA** (matchlock currently does not inject it into the guest's trust
-store, see [matchlock#2][matchlock-2]). So most HTTPS tools will break
-unless you build an image with the CA pre-installed or use `--insecure`
-flags.
-
-[matchlock-2]: https://github.com/jingkaihe/matchlock/issues/2
-
-## How auto-heal works
-
-`yolo`'s state file points at a `vm-xxxxxxxx`. Before every action `yolo`:
-
-1. Reads the stored vm-id.
-2. Calls `matchlock list` and looks up the row.
-3. If status is `running` → reuse.
-4. If status is `stopped`/`failed`/missing → `matchlock kill` + `matchlock
-   rm`, drop the state file, start a fresh VM, store the new id.
-
-This makes `yolo` idempotent: invoking it after a host reboot,
-`matchlock prune`, or a manual `matchlock rm` does the right thing without
-arguments.
-
-## Working with multiple VMs
-
-```bash
-yolo                       # this directory's VM
-yolo -n notes              # named VM 'notes'
-yolo -n notes -- vi list   # one-off in 'notes'
+# List everything yolo is tracking
 yolo ls
-# NAME                       VM-ID                 STATUS        IMAGE
-# cwd-7259073de3             vm-b1e68449           running       fedora:44
-# notes                      vm-4c9a02f1           running       fedora:44
-yolo -n notes stop
-yolo prune                 # drop stale bindings whose VMs are gone
+
+# Stop or remove
+yolo stop          # preserves rootfs
+yolo rm            # removes the VM and its name binding
 ```
 
-## Caveats and gotchas
+Full subcommand reference: [`docs/02-usage.md`](./docs/02-usage.md) (or
+`yolo --help`).
 
-- **VM filesystem is ephemeral** — anything you `dnf install` lives only as
-  long as the VM does. Persistent dev tooling should live in your `$PWD`
-  (mounted at `/work`) or in a custom OCI image.
-- **`yolo stop` is destructive for non-mounted state** — matchlock has no
-  `restart` for stopped VMs, so `yolo stop` followed by `yolo` will recreate
-  the VM from scratch (and re-run the provisioner). Use it deliberately.
-- **First boot pulls the OCI image** — `fedora:44` is ~150 MB. Subsequent
-  starts are sub-second once matchlock has cached the rootfs (`matchlock
-  image ls`).
-- **rugo is alpha** — the language is fun and productive but pre-1.0. See
-  [`rugo-quirks.md`](./rugo-quirks.md) for issues encountered while writing
-  `yolo`.
+## Documentation
 
-## Project layout
+A chapter-by-chapter tour lives in [`docs/`](./docs/README.md):
 
-```
-yolo.rugo                                   # the CLI
-provisioners/
-  provisioner-fedora-go.rugo                # default provisioner
-rugo-quirks.md                              # notes for the rugo author
-README.md                                   # this file
-```
+1. [Getting started](./docs/01-getting-started.md)
+2. [Daily usage](./docs/02-usage.md)
+3. [Configuration](./docs/03-configuration.md)
+4. [Provisioners](./docs/04-provisioners.md)
+5. [Yolofile reference](./docs/05-yolofile.md)
+6. [Networking](./docs/06-networking.md)
+7. [Export & import](./docs/07-export-import.md)
+8. [Troubleshooting](./docs/08-troubleshooting.md)
+
+For internals (auto-heal, state file layout, provisioner markers,
+source layout) see [`docs/architecture.md`](./docs/architecture.md).
 
 ## License
 

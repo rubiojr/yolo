@@ -1,26 +1,43 @@
-# Yolofile format
+# 5. Yolofile reference
 
 A `Yolofile` is a per-project file (always named `Yolofile`, always at the
 root of the directory you run `yolo` from) that tells `yolo` how to set up
 the microVM for that directory.
 
-It has two parts, in order:
+This chapter starts with a quick tutorial, then covers the full file
+format. For higher-level provisioner concepts (built-ins, AI agents,
+auto-detection) see [chapter 4](./04-provisioners.md).
 
-1. **Front matter** *(optional)* — a YAML-ish block of VM-creation overrides
-   wrapped between two `---` delimiter lines.
-2. **Body** — a plain `bash` script, run as `root` inside the guest microVM
-   via `matchlock exec -i -- bash` the first time you attach (and again
-   whenever the body changes — see [Re-provisioning](#re-provisioning)).
+## Tutorial
 
-The minimal Yolofile is just a body:
+The smallest useful Yolofile is three lines of bash:
 
 ```bash
+# ~/code/my-project/Yolofile
 #!/usr/bin/env bash
 set -euo pipefail
 dnf -q install go git make
 ```
 
-The maximal Yolofile is a front matter block followed by a body:
+Drop it at the root of your project and run:
+
+```bash
+cd ~/code/my-project
+yolo
+# [yolo] applying yolofile:2ade95cded20 to vm-xxxxxxxx
+# (your bash body runs as root inside the VM)
+```
+
+After provisioning, you land in `/work` with your project mounted and
+Go installed. Subsequent `yolo` invocations in this directory reattach
+in under a second and **skip** the Yolofile — the content hash hasn't
+changed.
+
+Edit the Yolofile and re-run `yolo` — the hash changes, so the script
+runs again automatically. You don't need `--force` or `yolo provision`.
+
+If you also want to tune the VM itself (more memory, a different base
+image, …), add a YAML-style front matter block at the very top:
 
 ```bash
 ---
@@ -33,6 +50,24 @@ disk-size: 64G
 set -euo pipefail
 dnf -q install go git make
 ```
+
+Front matter is read by `yolo` on the host side **before** the VM is
+created. It does **not** trigger re-provisioning (matchlock cannot
+resize an existing rootfs); to apply new resource limits you have to
+`yolo rm` the VM first.
+
+The rest of this chapter is the canonical reference for the file
+format.
+
+## File structure
+
+A Yolofile has two parts, in order:
+
+1. **Front matter** *(optional)* — a YAML-ish block of VM-creation overrides
+   wrapped between two `---` delimiter lines.
+2. **Body** — a plain `bash` script, run as `root` inside the guest microVM
+   via `matchlock exec -i -- bash` the first time you attach (and again
+   whenever the body changes — see [Re-provisioning](#re-provisioning)).
 
 ## Detection
 
@@ -171,8 +206,9 @@ lowest priority:
    `$YOLO_MEM_MB`, `$YOLO_DISK_MB`.
 4. **Built-in default** — `fedora:44`, 2 CPU, 2048 MiB, 32768 MiB.
 
-Per-VM image pins set by `yolo import NAME IMAGE` are applied inside
-`start_vm` and override the resolved `image` from the steps above.
+Per-VM image pins set by `yolo import FILE [-n NAME]` are applied
+inside `start_vm` and override the resolved `image` from the steps
+above.
 
 ## Scope
 

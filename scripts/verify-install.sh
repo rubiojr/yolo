@@ -118,19 +118,55 @@ log "  install.sh: $INSTALL_SH"
 
 # ---------------- Image cache ----------------
 mkdir -p "$CACHE_DIR"
-IMAGE_DIR_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_VERSION}/Cloud/x86_64/images/"
+# Fedora's per-release Cloud image filename includes a minor revision
+# (e.g. Fedora-Cloud-Base-Generic-44-1.5.x86_64.qcow2) that changes with
+# each respin, so we scrape the directory listing to discover it.
+#
+# Use dl.fedoraproject.org (master mirror) as the primary source: it always
+# serves Apache-style HTML directory listings. download.fedoraproject.org
+# is a redirector that hands you off to a geo-selected mirror — and many of
+# those mirrors do NOT serve directory listings (or serve a different HTML
+# format), which makes the scrape fail unpredictably (e.g. on GitHub-hosted
+# runners). We fall back to download.fedoraproject.org if the master is
+# unreachable.
+IMAGE_DIR_PRIMARY="https://dl.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_VERSION}/Cloud/x86_64/images/"
+IMAGE_DIR_FALLBACK="https://download.fedoraproject.org/pub/fedora/linux/releases/${FEDORA_VERSION}/Cloud/x86_64/images/"
 IMAGE_NAME_CACHED="Fedora-Cloud-Base-Generic-${FEDORA_VERSION}.qcow2"
 IMAGE="${IMAGE:-$CACHE_DIR/$IMAGE_NAME_CACHED}"
+
+# scrape_listing URL  → echoes a matching Fedora-Cloud-Base-...qcow2 filename, or empty
+scrape_listing() {
+  local url="$1"
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+    -A 'yolo-verify/1.0 (+https://github.com/rubiojr/yolo)' \
+    --max-time 60 \
+    "$url" \
+    | sed -nE 's/.*href="(Fedora-Cloud-Base[^"]*\.x86_64\.qcow2)".*/\1/p' \
+    | sort -u | head -n1
+}
+
 if [ ! -s "$IMAGE" ]; then
   log "Discovering Fedora $FEDORA_VERSION cloud image filename"
-  REMOTE_NAME="$(
-    curl -fsSL "$IMAGE_DIR_URL" \
-      | sed -nE 's/.*href="(Fedora-Cloud-Base[^"]*\.x86_64\.qcow2)".*/\1/p' \
-      | sort -u | head -n1
-  )"
-  [ -n "$REMOTE_NAME" ] || die "couldn't find a Fedora cloud .qcow2 at $IMAGE_DIR_URL (try --image)"
+  IMAGE_DIR_URL="$IMAGE_DIR_PRIMARY"
+  REMOTE_NAME="$(scrape_listing "$IMAGE_DIR_URL" || true)"
+  if [ -z "$REMOTE_NAME" ]; then
+    warn "  primary mirror returned no match: $IMAGE_DIR_PRIMARY"
+    IMAGE_DIR_URL="$IMAGE_DIR_FALLBACK"
+    REMOTE_NAME="$(scrape_listing "$IMAGE_DIR_URL" || true)"
+  fi
+  if [ -z "$REMOTE_NAME" ]; then
+    warn "  fallback mirror returned no match: $IMAGE_DIR_FALLBACK"
+    warn "  (first 500 bytes of the fallback response for debugging:)"
+    curl -fsSL --max-time 30 -A 'yolo-verify/1.0' "$IMAGE_DIR_FALLBACK" 2>/dev/null | head -c 500 >&2 || true
+    echo >&2
+    die "couldn't find a Fedora cloud .qcow2 (tried $IMAGE_DIR_PRIMARY and $IMAGE_DIR_FALLBACK; pass --image to override)"
+  fi
   log "  fetching $REMOTE_NAME"
-  curl -fL --proto '=https' --tlsv1.2 -o "$IMAGE.part" "${IMAGE_DIR_URL}${REMOTE_NAME}" \
+  curl -fL --proto '=https' --tlsv1.2 \
+    --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+    -A 'yolo-verify/1.0' \
+    -o "$IMAGE.part" "${IMAGE_DIR_URL}${REMOTE_NAME}" \
     || die "failed to download $IMAGE_DIR_URL$REMOTE_NAME"
   mv "$IMAGE.part" "$IMAGE"
 fi

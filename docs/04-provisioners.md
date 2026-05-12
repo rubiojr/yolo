@@ -84,6 +84,18 @@ yolo --ai-agent              # installs `opencode` (default)
 yolo --ai-agent copilot      # installs `copilot`
 ```
 
+You can also pin the agent in a Yolofile's front matter:
+
+```yaml
+---
+image: fedora:44
+ai-agent: opencode
+---
+```
+
+CLI flags (`--ai-agent` / `--no-ai-agent`) always win over the front-matter
+value.
+
 The agent installer runs after the language provisioner and is
 remembered as a separate marker (`ai-agent:NAME`), so editing the agent
 script invalidates only the agent layer.

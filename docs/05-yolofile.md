@@ -116,6 +116,7 @@ a single `key: value` pair.
 | `cpus`                                   | integer | `2`          | `4`, `8`                                |
 | `memory`                                 | size    | `2048` (MiB) | `4G`, `2048M`, `2048`                   |
 | `disk-size` *(aliases: `disk`, `disk_mb`)* | size    | `32768` (MiB)| `64G`, `100g`, `32768`                  |
+| `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
 
 Unknown keys produce a warning (`Yolofile: ignoring unknown front matter
 key '...'`) but do not stop the run, so you can add a comment-like key
@@ -155,6 +156,23 @@ Both accept the same human-readable size format:
 
 Negative or zero values, missing/invalid units, and trailing junk are all
 errors.
+
+#### `ai-agent`
+
+Layer an AI coding agent on top of the language provisioner, equivalent to
+passing `--ai-agent NAME` on the command line. Recognised values:
+
+- A known agent name (`opencode`, `copilot`). Unknown names are an error.
+- `default` / `true` — install the built-in default agent (currently
+  `opencode`); the same as passing `--ai-agent` with no name.
+- `none` / `false` / empty string — explicitly opt out; equivalent to
+  `--no-ai-agent`.
+
+Precedence: a CLI flag (`--ai-agent` or `--no-ai-agent`) always wins over
+the front-matter value, which in turn wins over the unset default of "no
+agent". The agent layer is tracked under its own re-provisioning marker
+(`ai-agent:NAME`), so swapping it in/out via front matter triggers exactly
+the agent install, not a full re-provision of the language stack.
 
 ## Body
 

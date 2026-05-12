@@ -3,6 +3,7 @@ image: fedora:44
 cpus: 4
 memory: 4G
 disk-size: 32G 
+ai-agent: opencode
 ---
 #!/usr/bin/env bash
 # Yolofile — provisions a yolo development VM with mise + Go (latest) + rugo.

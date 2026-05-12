@@ -618,7 +618,7 @@ def parse_args(args)
       end
     elsif a == "--no-ai-agent"
       agent = ""
-      agent_set = false
+      agent_set = true
     elsif a == "-h" || a == "--help"
       print_help()
       os.exit(0)
@@ -1265,8 +1265,8 @@ end
 # Implemented inline-ish via a hash return; the caller does the actual
 # assignments because rugo functions cannot mutate module-level variables.
 def validate_frontmatter(fm)
-  out = {image: "", cpus: "", mem_mb: "", disk_mb: ""}
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true}
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true}
   for k in fm
     if known[k] != true
       warn("Yolofile: ignoring unknown front matter key '#{k}'")
@@ -1316,6 +1316,28 @@ def validate_frontmatter(fm)
       os.exit(2)
     end
     out.disk_mb = sz
+  end
+  v_agent = fm["ai_agent"]
+  if v_agent != nil
+    if v_agent == "" || v_agent == "none" || v_agent == "false"
+      out.agent = ""
+      out.agent_set = true
+    elsif v_agent == "default" || v_agent == "true"
+      out.agent = DEFAULT_AI_AGENT
+      out.agent_set = true
+    else
+      if AI_AGENTS[v_agent] == nil
+        names = []
+        for n in AI_AGENTS
+          names = append(names, n)
+        end
+        known_list = str.join(names, ", ")
+        err_("Yolofile: unknown 'ai-agent' value: '#{v_agent}' (known: #{known_list})")
+        os.exit(2)
+      end
+      out.agent = v_agent
+      out.agent_set = true
+    end
   end
   return out
 end
@@ -1896,6 +1918,10 @@ if applies_resources && has_yolofile()
   if fm_resolved.disk_mb != ""
     disk_mb = fm_resolved.disk_mb
   end
+  # CLI --ai-agent / --no-ai-agent wins; otherwise honour Yolofile front matter.
+  if !parsed.agent_set && fm_resolved.agent_set
+    parsed.agent = fm_resolved.agent
+  end
 end
 
 # CLI flag overrides run last so they win over both env vars and Yolofile.
@@ -1939,3 +1965,4 @@ elsif sub == "import"
 else
   cmd_attach(name, parsed.passthrough, parsed.prov, parsed.no_prov, parsed.agent)
 end
+

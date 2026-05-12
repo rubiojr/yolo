@@ -73,6 +73,28 @@ provisioner). Use `yolo stop` deliberately, not as a "pause" button.
 Either run `yolo prune` (drops the stale binding) or just `yolo` (it
 will notice the VM is gone and auto-heal).
 
+### Processes from one `yolo` shell aren't visible in another
+
+Each `yolo` attach (and each `yolo -- CMD`) is a separate
+[`matchlock exec`][matchlock-exec] invocation. `matchlock exec` runs
+your command inside the VM under a fresh PID namespace and a private
+`/proc` mount, so sibling sessions can't see each other's processes
+via `ps`, `top`, `pgrep`, `kill`, or `/proc/<pid>` — even when both run
+as `root`. This is deliberate sandboxing in matchlock; it's not a yolo
+limitation and there's no yolo flag to disable it.
+
+The VM filesystem itself **is** shared across sessions — the workspace
+(`/work`), `$HOME`, and the rest of the guest disk are the same
+underlying storage. Files written in one session are immediately
+visible from another; only the *process view* is isolated.
+
+If you need long-running processes that survive a session and remain
+reachable from later attaches, run them under a supervisor inside the
+guest (for example a `systemd` user unit) and let each `yolo` shell
+talk to that supervisor.
+
+[matchlock-exec]: https://github.com/jingkaihe/matchlock
+
 ### Disk filling up
 
 ```bash

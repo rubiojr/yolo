@@ -95,10 +95,14 @@ RUNTIME   = env_or("XDG_RUNTIME_DIR", "/tmp")
 STATE_DIR = filepath.join(RUNTIME, "yolo")
 USER_FLAG = env_or("YOLO_USER", "")
 
-# Mutable per-invocation override for the disk size. Initialized to the
-# env-var-or-default constant; `--disk-size` (parsed in parse_args) replaces
-# this in main before any VM is started.
+# Mutable per-invocation overrides for the VM-creation resource settings.
+# Initialized to the env-var-or-default constants above. Yolofile front matter
+# (parsed in main for vm-creating subcommands) and per-flag CLI overrides
+# (e.g. `--disk-size`) replace these before the first `matchlock run`.
 disk_mb = DISK_MB
+mem_mb  = MEM_MB
+cpus    = CPUS
+image   = IMAGE
 
 mkdir -p "#{STATE_DIR}"
 
@@ -162,7 +166,7 @@ def start_vm(name)
   # an imported VM boots from its custom OCI image instead of fedora:44.
   img = read_image(name)
   if img == ""
-    img = IMAGE
+    img = image
   end
   log("starting #{color.bold(img)} VM #{color.bold(name)} for #{os.cwd()}")
   user_arg = ""
@@ -183,8 +187,8 @@ def start_vm(name)
       -v "#{cwd}:.:host_fs" \
       -w "#{WORKSPACE}" \
       --hostname "#{name}" \
-      --cpus #{CPUS} \
-      --memory #{MEM_MB} \
+      --cpus #{cpus} \
+      --memory #{mem_mb} \
       --disk-size #{disk_mb} \
       #{allow_arg} \
       #{user_arg} \
@@ -634,6 +638,9 @@ def print_help
   puts "Yolofile:"
   puts "  A plain bash script (run as root in the VM). Edit-and-rerun"
   puts "  automatically re-provisions (content-hashed for the marker)."
+  puts "  May begin with a YAML-style '---' front matter block declaring"
+  puts "  VM-creation overrides (image, cpus, memory, disk-size). See"
+  puts "  docs/yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image"
@@ -1046,7 +1053,9 @@ end
 # ---------------- Yolofile (local provisioner) ----------------
 # If a file named Yolofile exists in $PWD, yolo uses it as the provisioner
 # instead of the embedded default. The marker key includes a sha256 of the
-# content so editing the Yolofile triggers a re-provision on the next attach.
+# bash body (excluding any leading front matter) so editing the script
+# triggers a re-provision on the next attach. Editing only the front matter
+# does NOT re-provision — see docs/yolofile.md for the full contract.
 
 YOLOFILE = "Yolofile"
 
@@ -1056,6 +1065,174 @@ end
 
 def has_yolofile
   return os.file_exists(yolofile_path())
+end
+
+# Strip optional surrounding double or single quotes from a value. Used when
+# parsing Yolofile front matter values like `image: "fedora:44"`.
+def unquote_value(s)
+  if len(s) >= 2
+    first = str.slice(s, 0, 1)
+    last = str.slice(s, len(s) - 1, len(s))
+    if (first == "\"" && last == "\"") || (first == "'" && last == "'")
+      return str.slice(s, 1, len(s) - 1)
+    end
+  end
+  return s
+end
+
+# Conservative allowlist for OCI image references used in front matter.
+# Front matter is repo-controlled and flows into the host-side `matchlock run`
+# shell command, so any value that ends up there must be tightly bounded:
+# we reject quotes, whitespace, $, backticks, semicolons, and anything else
+# that could escape the surrounding double quotes in the rendered script.
+# This is stricter than what OCI technically allows but covers the universe
+# of reasonable image references (registries, ports, tags, digests).
+def valid_image_ref(s)
+  if s == ""
+    return false
+  end
+  for ch in str.chars(s)
+    is_letter = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+    is_digit  = ch >= "0" && ch <= "9"
+    is_safe   = ch == "." || ch == "_" || ch == "-" || ch == "/" || ch == ":" || ch == "@" || ch == "+"
+    if !is_letter && !is_digit && !is_safe
+      return false
+    end
+  end
+  return true
+end
+
+# Parse YAML-ish front matter from a Yolofile. The front matter, if present,
+# is delimited by `---` lines at the very top of the file:
+#
+#   ---
+#   image: fedora:44
+#   cpus: 4
+#   memory: 4G
+#   disk-size: 64G
+#   ---
+#   #!/usr/bin/env bash
+#   ...
+#
+# Returns {fm: {normalized_key => value, ...}, body: "rest of file"}. Keys
+# are lowercased and `-` is rewritten to `_`. Values are trimmed and have
+# optional surrounding quotes stripped. Lines starting with `#` and blank
+# lines inside the front matter block are ignored. If the file does not
+# start with `---`, the fast path returns `{fm: {}, body: content}` so the
+# bash body is bit-identical (and its sha256 unchanged) for existing
+# pre-front-matter Yolofiles. An opening `---` without a matching closing
+# `---` is an error — better than executing `---` as bash.
+def parse_yolofile(content)
+  if !str.starts_with(content, "---")
+    return {fm: {}, body: content, err: ""}
+  end
+  # The "---" must be a full line (followed by \n, \r\n, or EOF).
+  if len(content) > 3
+    c3 = str.slice(content, 3, 4)
+    if c3 != "\n" && c3 != "\r"
+      return {fm: {}, body: content, err: ""}
+    end
+  end
+
+  lines = []
+  for line in str.each_line(content)
+    lines = append(lines, str.trim_suffix(line, "\r"))
+  end
+  fm = {}
+  i = 1
+  closed = false
+  while i < len(lines)
+    t = str.trim(lines[i])
+    if t == "---"
+      closed = true
+      i = i + 1
+      break
+    end
+    if t != "" && !str.starts_with(t, "#")
+      idx = str.index(t, ":")
+      if idx > 0
+        k = str.lower(str.trim(str.slice(t, 0, idx)))
+        k = str.replace(k, "-", "_")
+        v = unquote_value(str.trim(str.slice(t, idx + 1, len(t))))
+        fm[k] = v
+      end
+    end
+    i = i + 1
+  end
+  if !closed
+    return {fm: {}, body: "", err: "front matter opens with '---' but is missing a closing '---' delimiter"}
+  end
+  body_lines = []
+  while i < len(lines)
+    body_lines = append(body_lines, lines[i])
+    i = i + 1
+  end
+  return {fm: fm, body: str.join(body_lines, "\n"), err: ""}
+end
+
+# Apply Yolofile front matter to the mutable resource globals. Called from
+# main only for subcommands that may create/recreate a VM, so a malformed
+# Yolofile cannot block `yolo ls`, `yolo stop`, etc.
+#
+# Precedence (top wins): CLI flag > Yolofile front matter > $YOLO_* env vars
+# > built-in defaults.
+#
+# Implemented inline-ish via a hash return; the caller does the actual
+# assignments because rugo functions cannot mutate module-level variables.
+def validate_frontmatter(fm)
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: ""}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true}
+  for k in fm
+    if known[k] != true
+      warn("Yolofile: ignoring unknown front matter key '#{k}'")
+    end
+  end
+  v_image = fm["image"]
+  if v_image != nil && v_image != ""
+    if !valid_image_ref(v_image)
+      err_("Yolofile: invalid 'image' value: '#{v_image}' (rejected — only [A-Za-z0-9._/:@+-] allowed in image references via front matter)")
+      os.exit(2)
+    end
+    out.image = v_image
+  end
+  v_cpus = fm["cpus"]
+  if v_cpus != nil && v_cpus != ""
+    n = try conv.to_i(v_cpus) or -1
+    if n <= 0
+      err_("Yolofile: invalid 'cpus' value: '#{v_cpus}' (expected a positive integer)")
+      os.exit(2)
+    end
+    out.cpus = conv.to_s(n)
+  end
+  v_mem = fm["memory"]
+  if v_mem != nil && v_mem != ""
+    sz = parse_disk_size(v_mem)
+    if sz == ""
+      err_("Yolofile: invalid 'memory' value: '#{v_mem}' (expected e.g. 4G, 2048M, or a bare MiB integer)")
+      os.exit(2)
+    end
+    out.mem_mb = sz
+  end
+  ds = ""
+  v_ds  = fm["disk_size"]
+  v_d   = fm["disk"]
+  v_dmb = fm["disk_mb"]
+  if v_ds != nil && v_ds != ""
+    ds = v_ds
+  elsif v_d != nil && v_d != ""
+    ds = v_d
+  elsif v_dmb != nil && v_dmb != ""
+    ds = v_dmb
+  end
+  if ds != ""
+    sz = parse_disk_size(ds)
+    if sz == ""
+      err_("Yolofile: invalid 'disk-size' value: '#{ds}' (expected e.g. 32G, 16384, etc.)")
+      os.exit(2)
+    end
+    out.disk_mb = sz
+  end
+  return out
 end
 
 # Best-effort: pick a built-in provisioner based on files in $PWD.
@@ -1121,7 +1298,13 @@ def resolve_provisioner(prov_name)
   src = ""
   display = pname
   if pname == "__yolofile__"
-    src = os.read_file(yolofile_path())
+    raw = os.read_file(yolofile_path())
+    parsed = parse_yolofile(raw)
+    if parsed.err != ""
+      err_("Yolofile: #{parsed.err}")
+      os.exit(2)
+    end
+    src = parsed.body
     display = "Yolofile"
   else
     src = PROVISIONERS[pname]
@@ -1352,8 +1535,8 @@ def cmd_export(name, out_path)
     "  \"src_image\": \"#{json_escape(src_image)}\",\n" +
     "  \"cwd\": \"#{json_escape(cwd_disp)}\",\n" +
     "  \"workspace\": \"#{json_escape(WORKSPACE)}\",\n" +
-    "  \"cpus\": \"#{json_escape(CPUS)}\",\n" +
-    "  \"mem_mb\": \"#{json_escape(MEM_MB)}\",\n" +
+    "  \"cpus\": \"#{json_escape(cpus)}\",\n" +
+    "  \"mem_mb\": \"#{json_escape(mem_mb)}\",\n" +
     "  \"disk_mb\": \"#{json_escape(disk_mb)}\",\n" +
     "  \"has_yolofile\": #{has_yolofile},\n" +
     "  \"applied\": #{applied_json}\n" +
@@ -1602,15 +1785,43 @@ end
 
 # ---------------- Main ----------------
 parsed = parse_args(os.args())
+
+# Yolofile front matter: applied only for subcommands that may create or
+# recreate a VM. This is deliberate — a malformed Yolofile must not block
+# `yolo rm`, `yolo stop`, `yolo logs`, etc., which need to operate on
+# already-existing VM state regardless of the (possibly broken) file.
+sub = parsed.sub
+applies_resources = (sub == "" || sub == "provision" || sub == "export")
+if applies_resources && has_yolofile()
+  yf_parsed = parse_yolofile(os.read_file(yolofile_path()))
+  if yf_parsed.err != ""
+    err_("Yolofile: #{yf_parsed.err}")
+    os.exit(2)
+  end
+  fm_resolved = validate_frontmatter(yf_parsed.fm)
+  if fm_resolved.image != ""
+    image = fm_resolved.image
+  end
+  if fm_resolved.cpus != ""
+    cpus = fm_resolved.cpus
+  end
+  if fm_resolved.mem_mb != ""
+    mem_mb = fm_resolved.mem_mb
+  end
+  if fm_resolved.disk_mb != ""
+    disk_mb = fm_resolved.disk_mb
+  end
+end
+
+# CLI flag overrides run last so they win over both env vars and Yolofile.
 if parsed.disk_mb != ""
   disk_mb = parsed.disk_mb
 end
+
 name = parsed.name
 if name == ""
   name = default_name()
 end
-
-sub = parsed.sub
 if sub == "ls"
   cmd_ls()
 elsif sub == "du"

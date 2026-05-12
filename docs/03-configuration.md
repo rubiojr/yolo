@@ -75,8 +75,8 @@ For per-project configuration that travels with the repo, use a
 
 `--ai-agent [NAME]`
 :   After running the normal language provisioner, layer an AI agent
-    installer on top. Currently `copilot` (default if you pass
-    `--ai-agent` with no argument) and `opencode`.
+    installer on top. Currently `opencode` (default if you pass
+    `--ai-agent` with no argument) and `copilot`.
 
 `-- CMD ARGS...`
 :   Everything after `--` is the command to run inside the VM instead of

@@ -110,7 +110,7 @@ yolo                            Ensure VM, auto-provision (once), shell in.
 yolo -- CMD ARGS...             Run CMD inside the VM.
 yolo --provisioner NAME [...]   Use a specific provisioner (overrides Yolofile).
 yolo --no-provision [...]       Skip auto-provisioning (alias: --no-provisioner).
-yolo --ai-agent [NAME] [...]    Also install an AI agent (default: copilot).
+yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode).
                                 Known agents: copilot, opencode.
 yolo -n NAME [...]              Use a named VM instead of the per-CWD one.
 yolo --disk-size SIZE [...]     Override rootfs disk size for this run.

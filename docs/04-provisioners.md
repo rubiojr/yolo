@@ -80,8 +80,8 @@ On top of any language provisioner, `--ai-agent` installs an AI coding
 agent inside the VM:
 
 ```bash
-yolo --ai-agent              # installs `copilot` (default)
-yolo --ai-agent opencode     # installs `opencode`
+yolo --ai-agent              # installs `opencode` (default)
+yolo --ai-agent copilot      # installs `copilot`
 ```
 
 The agent installer runs after the language provisioner and is

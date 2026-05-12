@@ -67,7 +67,7 @@ AI_AGENTS = {
   "copilot"  => agent_copilot,
   "opencode" => agent_opencode
 }
-DEFAULT_AI_AGENT = "copilot"
+DEFAULT_AI_AGENT = "opencode"
 
 # ---------------- Config ----------------
 # Bump this on every release tag (also bumped by hand on `main` after a
@@ -647,7 +647,7 @@ def print_help
   puts "  yolo -- CMD ARGS...             Run CMD inside the VM."
   puts "  yolo --provisioner NAME [...]   Use a specific provisioner (overrides Yolofile)."
   puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
-  puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: copilot)."
+  puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode)."
   puts "                                  Known agents: copilot, opencode."
   puts "  yolo -n NAME [...]              Use a named VM."
   puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."

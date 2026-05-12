@@ -105,6 +105,14 @@ yolo prune                      Drop name bindings whose VM is gone.
 yolo provision [--provisioner NAME] [-n NAME]
                                 Force re-apply a provisioner (idempotent).
 yolo provisioners               List embedded provisioners.
+
+yolo export [-n NAME] [-o FILE] Snapshot the VM's current rootfs and yolo
+                                state into a single .tar.gz bundle.
+yolo import FILE [-n NAME] [--force]
+                                Import a bundle on another host; pins a
+                                local matchlock image so the next
+                                `yolo -n NAME` boots from the captured
+                                rootfs with provisioners already applied.
 ```
 
 ### Common flows

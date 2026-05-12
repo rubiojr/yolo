@@ -54,6 +54,14 @@ DEFAULT_PROVISIONER = ""
 embed "provisioners/ai-agents/copilot.sh"  as agent_copilot
 embed "provisioners/ai-agents/opencode.sh" as agent_opencode
 
+# ---------------- Embedded export/import helpers ----------------
+# The heavy lifting for `yolo export` / `yolo import` is shell — we keep it
+# in separate .sh files because rugo's heredoc parser doesn't deal well with
+# the volume of escape sequences and shell parameter expansions involved.
+embed "provisioners/yolo-export.sh"        as script_export
+embed "provisioners/yolo-import-unpack.sh" as script_import_unpack
+embed "provisioners/yolo-import-retag.sh"  as script_import_retag
+
 AI_AGENTS = {
   "copilot"  => agent_copilot,
   "opencode" => agent_opencode
@@ -145,7 +153,13 @@ end
 
 # Start a fresh VM bound to $name. Returns the new vm-id.
 def start_vm(name)
-  log("starting #{color.bold(IMAGE)} VM #{color.bold(name)} for #{os.cwd()}")
+  # Per-name image pin (from `yolo import`) overrides the global default so
+  # an imported VM boots from its custom OCI image instead of fedora:44.
+  img = read_image(name)
+  if img == ""
+    img = IMAGE
+  end
+  log("starting #{color.bold(img)} VM #{color.bold(name)} for #{os.cwd()}")
   user_arg = ""
   if USER_FLAG != ""
     user_arg = "--user #{USER_FLAG}"
@@ -159,7 +173,7 @@ def start_vm(name)
   cwd = os.cwd()
   script = <<~SH
     matchlock run \
-      --image "#{IMAGE}" \
+      --image "#{img}" \
       --workspace "#{WORKSPACE}" \
       -v "#{cwd}:.:host_fs" \
       -w "#{WORKSPACE}" \
@@ -193,6 +207,10 @@ def start_vm(name)
   end
   os.write_file(state_file(name), id)
   record_cwd(name)
+  # If an imported `.applied` file is waiting with the __IMPORTED__ sentinel,
+  # rewrite its first line to the new vm-id so the markers stick to this VM
+  # and provisioners skip re-running (their effects are already in the image).
+  rebind_imported_applied(name, id)
   wait_exec_ready(id)
   return id
 end
@@ -223,6 +241,71 @@ end
 
 def cwd_file(name)
   return filepath.join(STATE_DIR, "#{name}.cwd")
+end
+
+# Per-name image pin (set by `yolo import`). When present, start_vm uses this
+# image ref instead of $YOLO_IMAGE / fedora:44 — this is how an imported VM's
+# rootfs modifications survive: the rootfs is registered as a matchlock OCI
+# image and pinned here.
+def image_file(name)
+  return filepath.join(STATE_DIR, "#{name}.image")
+end
+
+def read_image(name)
+  path = image_file(name)
+  if !os.file_exists(path)
+    return ""
+  end
+  return str.trim(os.read_file(path))
+end
+
+def write_image(name, tag)
+  os.write_file(image_file(name), tag + "\n")
+end
+
+def remove_image(name)
+  path = image_file(name)
+  if os.file_exists(path)
+    os.remove(path)
+  end
+end
+
+# Sentinel used in <name>.applied right after import: the real vm-id is not
+# known yet (the VM doesn't exist), so we store this and let start_vm rewrite
+# line 1 once the VM is created. See rebind_imported_applied().
+IMPORTED_SENTINEL = "__IMPORTED__"
+
+# If <name>.applied was written by `yolo import` with the IMPORTED_SENTINEL as
+# line 1, replace that line with the freshly-allocated vm-id so the existing
+# applied_list()/is_applied() logic recognises the markers and skips re-running
+# provisioners (their effects are already baked into the imported image).
+def rebind_imported_applied(name, vm_id)
+  path = applied_file(name)
+  if !os.file_exists(path)
+    return
+  end
+  content = os.read_file(path)
+  lines = []
+  for line in str.each_line(content)
+    t = str.trim(line)
+    if t != ""
+      lines = append(lines, t)
+    end
+  end
+  if len(lines) == 0
+    return
+  end
+  if lines[0] != IMPORTED_SENTINEL
+    return
+  end
+  body = vm_id
+  i = 1
+  while i < len(lines)
+    body = body + "\n" + lines[i]
+    i = i + 1
+  end
+  os.write_file(path, body + "\n")
+  log("rebound imported provisioner markers to #{vm_id}")
 end
 
 def read_cwd(name)
@@ -393,6 +476,8 @@ def parse_args(args)
   rest = []
   passthrough = []
   in_passthrough = false
+  out_path = ""
+  force = false
   i = 0
   while i < len(args)
     a = args[i]
@@ -408,6 +493,11 @@ def parse_args(args)
       prov = args[i]
     elsif a == "--no-provision" || a == "--no-provisioner"
       no_prov = true
+    elsif a == "-o" || a == "--output"
+      i = i + 1
+      out_path = args[i]
+    elsif a == "--force"
+      force = true
     elsif a == "--ai-agent"
       # Optional value: if the next arg exists and isn't another flag /
       # subcommand, consume it as the agent name; otherwise default.
@@ -434,14 +524,14 @@ def parse_args(args)
     elsif a == "-h" || a == "--help"
       print_help()
       os.exit(0)
-    elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners")
+    elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners" || a == "export" || a == "import")
       sub = a
     else
       rest = append(rest, a)
     end
     i = i + 1
   end
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough}
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force}
 end
 
 def print_help
@@ -466,6 +556,13 @@ def print_help
   puts "  yolo provision [--provisioner NAME] [-n NAME]"
   puts "                                  Force re-apply a provisioner."
   puts "  yolo provisioners               List provisioners (embedded + ./Yolofile)."
+  puts ""
+  puts "  yolo export [-n NAME] [-o FILE] Export VM rootfs + state into a single"
+  puts "                                  .tar.gz (default: ./yolo-export-<n>-<ts>.tar.gz)."
+  puts "  yolo import FILE [-n NAME] [--force]"
+  puts "                                  Import an export bundle; pins a custom"
+  puts "                                  matchlock image so the first `yolo -n NAME`"
+  puts "                                  boots from the captured rootfs."
   puts ""
   puts "Provisioner resolution (in order):"
   puts "  1. --provisioner NAME (explicit)"
@@ -518,9 +615,11 @@ end
 def cmd_ls
   table = matchlock_table()
   printf_hdr()
+  seen = {}
   files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
   for f in files
     n = str.trim_suffix(filepath.base(f), ".vmid")
+    seen[n] = true
     id = str.trim(os.read_file(f))
     row = table[id]
     if row == nil
@@ -533,6 +632,18 @@ def cmd_ls
     cwd = read_cwd(n)
     print_row(n, id, st, im, display_path(cwd))
   end
+  # Imported-but-not-yet-started names: have <name>.image but no <name>.vmid.
+  img_files = try filepath.glob(filepath.join(STATE_DIR, "*.image")) or []
+  for f in img_files
+    n = str.trim_suffix(filepath.base(f), ".image")
+    if seen[n] == true
+      # already printed (running/stopped/gone)
+    else
+      tag = str.trim(os.read_file(f))
+      cwd = read_cwd(n)
+      print_row(n, "—", "imported", tag, display_path(cwd))
+    end
+  end
 end
 
 def printf_hdr
@@ -544,6 +655,8 @@ def print_row(name, id, st, im, cwd_disp)
     st_c = color.green(fmt.sprintf("%-12s", st))
   elsif st == "gone"
     st_c = color.red(fmt.sprintf("%-12s", st))
+  elsif st == "imported"
+    st_c = color.yellow(fmt.sprintf("%-12s", st))
   else
     st_c = color.dim(fmt.sprintf("%-12s", st))
   end
@@ -562,12 +675,15 @@ end
 
 def cmd_rm(name)
   id = read_state(name)
-  if id == ""
+  pinned_image = read_image(name)
+  if id == "" && pinned_image == ""
     warn("no VM tracked for '#{name}'")
     return
   end
-  vm_purge(id)
-  os.remove(state_file(name))
+  if id != ""
+    vm_purge(id)
+    os.remove(state_file(name))
+  end
   ap = applied_file(name)
   if os.file_exists(ap)
     os.remove(ap)
@@ -576,10 +692,39 @@ def cmd_rm(name)
   if os.file_exists(cf)
     os.remove(cf)
   end
+  remove_image(name)
+  # If the pinned image was created by `yolo import`, drop it from matchlock's
+  # image store too — but only when no other yolo name still pins the same tag.
+  # We restrict this to yolo-import/* to avoid removing user-supplied images.
+  if pinned_image != "" && str.starts_with(pinned_image, "yolo-import/")
+    if !image_pinned_elsewhere(pinned_image)
+      try `bash -c "matchlock image rm #{pinned_image} >/dev/null 2>&1"` or nil
+      log("removed imported image #{pinned_image}")
+    end
+  end
   # Best-effort: drop any stale lock dir for this name.
   ld = lock_dir(name)
   try `bash -c "rm -rf #{ld}"` or nil
-  log("removed #{id} (#{name})")
+  if id != ""
+    log("removed #{id} (#{name})")
+  else
+    log("removed imported binding (#{name})")
+  end
+end
+
+# Scan all *.image state files to see if any name pins `tag`. Used to decide
+# whether `matchlock image rm` is safe in cmd_rm (we call this AFTER removing
+# the binding for the name being deleted, so a `true` result means another
+# binding still references it).
+def image_pinned_elsewhere(tag)
+  files = try filepath.glob(filepath.join(STATE_DIR, "*.image")) or []
+  for f in files
+    other = str.trim(os.read_file(f))
+    if other == tag
+      return true
+    end
+  end
+  return false
 end
 
 def cmd_logs(name, extra)
@@ -601,8 +746,13 @@ end
 
 def cmd_status(name)
   id = read_state(name)
+  pinned = read_image(name)
   if id == ""
-    puts "untracked"
+    if pinned != ""
+      puts "imported (no vm yet) image: #{pinned}"
+    else
+      puts "untracked"
+    end
     return
   end
   table = matchlock_table()
@@ -611,11 +761,15 @@ def cmd_status(name)
     st = "gone"
   end
   applied = applied_list(name, id)
+  suffix = ""
+  if pinned != ""
+    suffix = " image: #{pinned}"
+  end
   if len(applied) == 0
-    puts "#{st} (#{id}) applied: -"
+    puts "#{st} (#{id}) applied: -#{suffix}"
   else
     csv = str.join(applied, ",")
-    puts "#{st} (#{id}) applied: #{csv}"
+    puts "#{st} (#{id}) applied: #{csv}#{suffix}"
   end
 end
 
@@ -993,6 +1147,402 @@ def cmd_provision(name, prov_name)
   log("provisioner finished (marker: #{applied_marker})")
 end
 
+# ---------------- Export / Import ----------------
+# Move a yolo VM between hosts in a single compressed file.
+#
+# Strategy: package the VM's merged rootfs as a custom OCI image (docker-save
+# tarball, ingested by `matchlock image import`) plus yolo's per-name state
+# (applied provisioner markers, cwd) plus metadata. The destination host
+# re-registers the image and pins it for the target name; the next `yolo`
+# creates a fresh VM from that image, preserving all in-guest changes
+# (installed packages, files outside the mounted workspace, etc.).
+#
+# Limitations:
+# - Live RAM/CPU state is not preserved (matchlock has no checkpoint/restore).
+# - Files under the mounted workspace (/work) are host-side; not part of rootfs.
+# - Pseudo filesystems (/proc, /sys, /dev, /run) and tmpfs are excluded.
+
+EXPORT_SCHEMA_VERSION = 1
+EXPORT_PLACEHOLDER_TAG = "yolo-export:placeholder"
+
+def valid_name(s)
+  if s == "" || len(s) > 128
+    return false
+  end
+  i = 0
+  while i < len(s)
+    c = str.slice(s, i, i + 1)
+    ok = false
+    # [A-Za-z0-9._:-]
+    if c >= "A" && c <= "Z"
+      ok = true
+    elsif c >= "a" && c <= "z"
+      ok = true
+    elsif c >= "0" && c <= "9"
+      ok = true
+    elsif c == "." || c == "_" || c == "-" || c == ":"
+      ok = true
+    end
+    if !ok
+      return false
+    end
+    i = i + 1
+  end
+  return true
+end
+
+def json_escape(s)
+  out = ""
+  i = 0
+  while i < len(s)
+    c = str.slice(s, i, i + 1)
+    if c == "\\"
+      out = out + "\\\\"
+    elsif c == "\""
+      out = out + "\\\""
+    elsif c == "\n"
+      out = out + "\\n"
+    elsif c == "\r"
+      out = out + "\\r"
+    elsif c == "\t"
+      out = out + "\\t"
+    else
+      out = out + c
+    end
+    i = i + 1
+  end
+  return out
+end
+
+# Wrap s in single quotes so the shell sees a literal value, escaping any
+# embedded single quotes with the classic '\'' trick. Used to splice rugo
+# values into the export/import shell preambles safely.
+def sh_squote(s)
+  return "'" + str.replace(s, "'", "'\\''") + "'"
+end
+
+def cmd_export(name, out_path)
+  acquire_lock(name, "export")
+  id = read_state(name)
+  if id == ""
+    err_("no VM tracked for '#{name}' — start it first with `yolo -n #{name}`")
+    release_lock(name)
+    os.exit(1)
+  end
+
+  # We need the VM running for `matchlock exec`. Auto-heal if needed: this
+  # may recreate the VM from its (pinned) image, which is the right thing —
+  # an export of a stopped/missing VM would otherwise have nothing to capture.
+  table = matchlock_table()
+  st = vm_status(id, table)
+  if st != "running"
+    warn("VM '#{name}' (#{id}) is '#{st}'; recreating to export")
+    id = ensure_vm(name)
+  end
+
+  # Resolve output path.
+  out = out_path
+  if out == ""
+    raw = try `bash -c "date -u +%Y%m%d-%H%M%S"` or ""
+    ts = str.trim(raw)
+    out = filepath.join(os.cwd(), "yolo-export-#{name}-#{ts}.tar.gz")
+  end
+
+  # Source image (per-name pin or env default) — recorded in metadata only.
+  src_image = read_image(name)
+  if src_image == ""
+    src_image = IMAGE
+  end
+
+  applied = applied_list(name, id)
+  cwd_disp = read_cwd(name)
+  hostname_raw = try `bash -c "hostname 2>/dev/null || echo unknown"` or "unknown"
+  hostname = str.trim(hostname_raw)
+  ts_raw = try `bash -c "date -u +%Y-%m-%dT%H:%M:%SZ"` or ""
+  ts_iso = str.trim(ts_raw)
+
+  # Yolofile from the recorded cwd (if it still exists and is readable).
+  yolofile_src = ""
+  if cwd_disp != ""
+    cand = filepath.join(cwd_disp, "Yolofile")
+    if os.file_exists(cand)
+      yolofile_src = cand
+    end
+  end
+
+  # Build metadata.json
+  applied_json = "[]"
+  if len(applied) > 0
+    parts = []
+    for p in applied
+      parts = append(parts, "\"" + json_escape(p) + "\"")
+    end
+    applied_json = "[" + str.join(parts, ",") + "]"
+  end
+
+  has_yolofile = "false"
+  if yolofile_src != ""
+    has_yolofile = "true"
+  end
+
+  meta = "{\n" +
+    "  \"schema_version\": \"#{EXPORT_SCHEMA_VERSION}\",\n" +
+    "  \"yolo_export\": true,\n" +
+    "  \"exported_at\": \"#{json_escape(ts_iso)}\",\n" +
+    "  \"source_host\": \"#{json_escape(hostname)}\",\n" +
+    "  \"name\": \"#{json_escape(name)}\",\n" +
+    "  \"src_vm_id\": \"#{json_escape(id)}\",\n" +
+    "  \"src_image\": \"#{json_escape(src_image)}\",\n" +
+    "  \"cwd\": \"#{json_escape(cwd_disp)}\",\n" +
+    "  \"workspace\": \"#{json_escape(WORKSPACE)}\",\n" +
+    "  \"cpus\": \"#{json_escape(CPUS)}\",\n" +
+    "  \"mem_mb\": \"#{json_escape(MEM_MB)}\",\n" +
+    "  \"disk_mb\": \"#{json_escape(DISK_MB)}\",\n" +
+    "  \"has_yolofile\": #{has_yolofile},\n" +
+    "  \"applied\": #{applied_json}\n" +
+    "}\n"
+
+  meta_tmp = "/tmp/yolo-export-meta-#{os.pid()}.json"
+  os.write_file(meta_tmp, meta)
+
+  # Stage in a tempdir. The actual heavy lifting (in-guest tar streaming,
+  # docker-save tarball construction, final compression) lives in an embedded
+  # bash script (provisioners/yolo-export.sh) so we can use `set -euo
+  # pipefail` and trap-cleanup the tempdir.
+  ap_path = applied_file(name)
+  cwd_path = cwd_file(name)
+  log("exporting #{color.bold(name)} (#{id}) → #{color.bold(out)}")
+  script = "" +
+    "export VM_ID="        + sh_squote(id) + "\n" +
+    "export NAME="         + sh_squote(name) + "\n" +
+    "export OUT="          + sh_squote(out) + "\n" +
+    "export META_TMP="     + sh_squote(meta_tmp) + "\n" +
+    "export AP_PATH="      + sh_squote(ap_path) + "\n" +
+    "export CWD_PATH="     + sh_squote(cwd_path) + "\n" +
+    "export YOLOFILE_SRC=" + sh_squote(yolofile_src) + "\n" +
+    "export PLACEHOLDER="  + sh_squote(EXPORT_PLACEHOLDER_TAG) + "\n" +
+    script_export
+
+  rc = try os.exec(script) or msg
+      err_("export failed:")
+      puts msg
+      try os.remove(meta_tmp) or nil
+      release_lock(name)
+      os.exit(1)
+      ""
+    end
+  puts rc
+  try os.remove(meta_tmp) or nil
+  release_lock(name)
+end
+
+def cmd_import(in_path, name_override, force)
+  if in_path == ""
+    err_("usage: yolo import FILE [-n NAME] [--force]")
+    os.exit(1)
+  end
+  if !os.file_exists(in_path)
+    err_("archive not found: #{in_path}")
+    os.exit(1)
+  end
+
+  # Resolve archive to an absolute path so the bash script's `cd` doesn't
+  # break a relative reference.
+  abs_raw = try `bash -c "readlink -f #{in_path}"` or ""
+  abs = str.trim(abs_raw)
+  if abs == ""
+    abs = in_path
+  end
+
+  # Extract to a fresh tempdir, hardened against path traversal.
+  work_raw = try `bash -c "mktemp -d -t yolo-import-XXXXXX"` or ""
+  work = str.trim(work_raw)
+  if work == ""
+    err_("could not create tempdir for import")
+    os.exit(1)
+  end
+
+  unpack = "" +
+    "export WORK=" + sh_squote(work) + "\n" +
+    "export ABS="  + sh_squote(abs) + "\n" +
+    script_import_unpack
+  rc = try os.exec(unpack) or msg
+      err_("archive extraction failed:")
+      puts msg
+      try `bash -c "rm -rf #{work}"` or nil
+      os.exit(1)
+      ""
+    end
+
+  # Parse metadata (cheap line-based extraction — we only need a few fields,
+  # and we don't trust the values for anything except display + name default).
+  meta_path = filepath.join(work, "metadata.json")
+  meta_raw  = os.read_file(meta_path)
+  meta_name = json_string_field(meta_raw, "name")
+  meta_cwd  = json_string_field(meta_raw, "cwd")
+  meta_src  = json_string_field(meta_raw, "src_image")
+  meta_host = json_string_field(meta_raw, "source_host")
+  meta_ts   = json_string_field(meta_raw, "exported_at")
+  meta_schema = json_string_field(meta_raw, "schema_version")
+  if meta_schema != "1"
+    err_("unsupported export schema_version '#{meta_schema}' (expected 1)")
+    try `bash -c "rm -rf #{work}"` or nil
+    os.exit(1)
+  end
+
+  target = name_override
+  if target == ""
+    target = meta_name
+  end
+  if !valid_name(target)
+    err_("invalid target name '#{target}' (allowed: [A-Za-z0-9._:-]+, max 128 chars)")
+    try `bash -c "rm -rf #{work}"` or nil
+    os.exit(1)
+  end
+
+  # Refuse to clobber an existing binding unless --force.
+  existing_vmid = read_state(target)
+  existing_img  = read_image(target)
+  if existing_vmid != "" || existing_img != ""
+    if !force
+      err_("name '#{target}' already bound (vm=#{existing_vmid}, image=#{existing_img}). Use --force to replace, or pass -n to choose a different name.")
+      try `bash -c "rm -rf #{work}"` or nil
+      os.exit(1)
+    end
+    log("--force: removing existing binding for '#{target}'")
+    cmd_rm(target)
+  end
+
+  # Destination-local unique tag derived from archive content. Using a content
+  # hash means re-importing the same file is idempotent; importing different
+  # archives under the same name still produces distinct tags.
+  hash_raw = try `bash -c "sha256sum #{abs} | awk '{print $1}' | cut -c1-12"` or ""
+  short = str.trim(hash_raw)
+  if short == ""
+    short = "unknown"
+  end
+  tag = "yolo-import/#{target}:#{short}"
+
+  acquire_lock(target, "import")
+
+  # Re-tag image.tar's manifest + repositories to the destination tag, then
+  # hand it to matchlock.
+  retag = "" +
+    "export WORK="        + sh_squote(work) + "\n" +
+    "export PLACEHOLDER=" + sh_squote(EXPORT_PLACEHOLDER_TAG) + "\n" +
+    "export TAG="         + sh_squote(tag) + "\n" +
+    script_import_retag
+  rc = try os.exec(retag) or msg
+      err_("matchlock image import failed:")
+      puts msg
+      try `bash -c "rm -rf #{work}"` or nil
+      release_lock(target)
+      os.exit(1)
+      ""
+    end
+  puts rc
+
+  # Pin the image for this name and stash the cwd for display.
+  write_image(target, tag)
+  if meta_cwd != ""
+    os.write_file(cwd_file(target), meta_cwd)
+  end
+
+  # Carry over applied provisioner markers under the IMPORTED_SENTINEL.
+  # start_vm() rewrites line 1 to the real vm-id on first attach (see
+  # rebind_imported_applied), so provisioners skip re-running on import.
+  state_dir = filepath.join(work, "state")
+  src_applied = filepath.join(state_dir, "#{meta_name}.applied")
+  if meta_name != "" && os.file_exists(src_applied)
+    raw = os.read_file(src_applied)
+    markers = []
+    line_idx = 0
+    for line in str.each_line(raw)
+      t = str.trim(line)
+      # line 0 was the original vm-id; skip it. Keep all subsequent markers.
+      if line_idx > 0 && t != ""
+        markers = append(markers, t)
+      end
+      line_idx = line_idx + 1
+    end
+    body = IMPORTED_SENTINEL
+    for m in markers
+      body = body + "\n" + m
+    end
+    os.write_file(applied_file(target), body + "\n")
+  end
+
+  try `bash -c "rm -rf #{work}"` or nil
+  release_lock(target)
+
+  src_info = ""
+  if meta_host != "" && meta_ts != ""
+    src_info = " (from #{meta_host} at #{meta_ts})"
+  end
+  log("imported '#{target}'#{src_info}")
+  log("  base image:   #{tag}")
+  if meta_src != ""
+    log("  src image:    #{meta_src}")
+  end
+  if meta_cwd != ""
+    log("  src cwd:      #{meta_cwd}")
+  end
+  puts ""
+  puts "Run `yolo -n #{target}` from your project directory to boot a VM from this image."
+end
+
+# Tiny JSON string-field extractor. We're parsing trusted-shape metadata that
+# we wrote ourselves with json_escape(), so this is good enough — we don't
+# want to take a JSON parser dep for one file.
+def json_string_field(src, key)
+  needle = "\"" + key + "\""
+  idx = str.index(src, needle)
+  if idx < 0
+    return ""
+  end
+  rest = str.slice(src, idx + len(needle), len(src))
+  # Find the colon, then the opening quote.
+  colon = str.index(rest, ":")
+  if colon < 0
+    return ""
+  end
+  after = str.slice(rest, colon + 1, len(rest))
+  q = str.index(after, "\"")
+  if q < 0
+    return ""
+  end
+  body = str.slice(after, q + 1, len(after))
+  # Find the closing quote, honouring \" escapes.
+  out = ""
+  i = 0
+  while i < len(body)
+    c = str.slice(body, i, i + 1)
+    if c == "\\" && i + 1 < len(body)
+      n = str.slice(body, i + 1, i + 2)
+      if n == "\""
+        out = out + "\""
+      elsif n == "\\"
+        out = out + "\\"
+      elsif n == "n"
+        out = out + "\n"
+      elsif n == "r"
+        out = out + "\r"
+      elsif n == "t"
+        out = out + "\t"
+      else
+        out = out + n
+      end
+      i = i + 2
+    elsif c == "\""
+      return out
+    else
+      out = out + c
+      i = i + 1
+    end
+  end
+  return out
+end
+
 # ---------------- Main ----------------
 parsed = parse_args(os.args())
 name = parsed.name
@@ -1021,6 +1571,15 @@ elsif sub == "provisioners"
   cmd_provisioners()
 elsif sub == "prune"
   cmd_prune()
+elsif sub == "export"
+  cmd_export(name, parsed.out_path)
+elsif sub == "import"
+  # First positional arg after `import` is the archive path.
+  in_path = ""
+  if len(parsed.rest) > 0
+    in_path = parsed.rest[0]
+  end
+  cmd_import(in_path, parsed.name, parsed.force)
 else
   cmd_attach(name, parsed.passthrough, parsed.prov, parsed.no_prov, parsed.agent)
 end

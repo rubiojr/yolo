@@ -1,7 +1,6 @@
 # yolo
 
-> Fast, persistent, per-directory [matchlock][matchlock] microVMs with
-> one-shot provisioning. Written in [rugo][rugo].
+Fast, persistent, per-directory [matchlock][matchlock] microVMs with one-shot provisioning. Written in [rugo][rugo].
 
 [matchlock]: https://github.com/jingkaihe/matchlock
 [rugo]: https://github.com/rubiojr/rugo
@@ -58,9 +57,6 @@ go version go1.26.3 linux/amd64
 ```bash
 # One-step install on Fedora (matchlock + yolo)
 curl -fsSL https://raw.githubusercontent.com/rubiojr/yolo/main/web/install.sh | bash
-
-# Prebuilt binary
-install -m 0755 yolo ~/.local/bin/yolo
 
 # From source
 rugo build yolo.rugo

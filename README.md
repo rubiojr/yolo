@@ -56,6 +56,9 @@ go version go1.26.3 linux/amd64
 ## Install
 
 ```bash
+# One-step install on Fedora (matchlock + yolo)
+curl -fsSL https://raw.githubusercontent.com/rubiojr/yolo/main/web/install.sh | bash
+
 # Prebuilt binary
 install -m 0755 yolo ~/.local/bin/yolo
 

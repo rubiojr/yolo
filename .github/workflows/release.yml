@@ -1,0 +1,160 @@
+name: Release
+
+# Build static Linux yolo binaries (amd64 + arm64) and attach them to a
+# GitHub release. Triggered automatically on `v*` tag pushes; can also be
+# fired manually with workflow_dispatch (set `tag` to an existing tag to
+# publish, leave empty to just produce artifacts).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish a release for (leave empty for artifacts only)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Resolve and validate tag / ref
+        id: resolve
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # Strict tag pattern guards against shell-injection via dispatch input.
+          tag_re='^v[0-9][A-Za-z0-9._+-]*$'
+
+          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            ref="$GITHUB_REF"
+            publish="true"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+            ref="refs/tags/$INPUT_TAG"
+            publish="true"
+          else
+            tag=""
+            ref="$GITHUB_REF"
+            publish="false"
+          fi
+
+          if [ -n "$tag" ] && ! printf '%s' "$tag" | grep -Eq "$tag_re"; then
+            echo "Refusing to use tag '$tag' — must match $tag_re" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "ref=$ref"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (linux/${{ matrix.goarch }})
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: ${{ matrix.goarch }}
+      ASSET: yolo-linux-${{ matrix.goarch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Always build from the exact ref we'll attach the release to.
+          ref: ${{ needs.validate.outputs.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Install rugo (host arch)
+        # rugo runs on the runner (amd64) — clear cross-compile vars so we
+        # don't accidentally install an arm64 rugo binary we can't execute.
+        run: |
+          env -u GOOS -u GOARCH -u CGO_ENABLED \
+            go install github.com/rubiojr/rugo@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build yolo (linux/${{ matrix.goarch }})
+        # rugo emits Go source and invokes `go build`, which honours the
+        # GOOS / GOARCH / CGO_ENABLED env vars set on this job, so no
+        # special cross toolchain is required for arm64.
+        run: |
+          rugo build yolo.rugo -o "$ASSET"
+          chmod +x "$ASSET"
+          file "$ASSET"
+
+      - name: Smoke test (amd64 only)
+        if: matrix.goarch == 'amd64'
+        run: ./"$ASSET" --help >/dev/null
+
+      - name: Generate checksum
+        run: sha256sum "$ASSET" > "$ASSET.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    if: needs.validate.outputs.publish == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          files: |
+            dist/yolo-linux-amd64
+            dist/yolo-linux-amd64.sha256
+            dist/yolo-linux-arm64
+            dist/yolo-linux-arm64.sha256
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,9 +4,9 @@
 # Quick install:
 #   curl -fsSL https://yolo.rbel.co/install.sh | bash
 #
-# Or pin versions:
+# Or override versions:
 #   curl -fsSL https://yolo.rbel.co/install.sh \
-#     | bash -s -- --yolo-version v0.1.0 --matchlock-version 0.2.4
+#     | bash -s -- --yolo-version v0.1.0 --matchlock-version 0.2.13
 #
 # Supported hosts:
 #   - Fedora (Workstation/Server/Cloud; not Atomic/rpm-ostree variants)
@@ -24,8 +24,11 @@ set -euo pipefail
 
 # ---------------- Configuration ----------------
 YOLO_REPO="${YOLO_REPO:-rubiojr/yolo}"
-YOLO_VERSION="${YOLO_VERSION:-}"            # empty = latest
-MATCHLOCK_VERSION="${MATCHLOCK_VERSION:-}"  # empty = latest
+YOLO_VERSION="${YOLO_VERSION:-}"                    # empty = latest
+# matchlock is pinned to a known-good release for reproducible installs.
+# Bump this after verifying yolo still works against the new release
+# (see release notes at https://github.com/jingkaihe/matchlock/releases).
+MATCHLOCK_VERSION="${MATCHLOCK_VERSION:-0.2.13}"
 YOLO_PREFIX="${YOLO_PREFIX:-$HOME/.local/bin}"
 
 SKIP_MATCHLOCK=0
@@ -51,7 +54,7 @@ Options:
   --yolo-version VERSION        Install a specific yolo release (e.g. v0.1.0).
                                 Default: latest.
   --matchlock-version VERSION   Install a specific matchlock release.
-                                Default: latest.
+                                Default: pinned (see MATCHLOCK_VERSION in this script).
   --prefix DIR                  Install yolo into DIR (default: ~/.local/bin).
   --skip-matchlock              Skip installing matchlock (assume already present).
   --skip-deps                   Skip the host package-manager install of

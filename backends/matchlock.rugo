@@ -1,0 +1,379 @@
+# backends/matchlock.rugo — matchlock backend for yolo.
+#
+# Implements the contract documented in backends/INTERFACE.md.
+#
+# yolo.rugo owns all per-name state (.vmid, .applied, .image, .cwd, .backend);
+# this module only knows how to talk to the `matchlock` CLI binary and the
+# matchlock state directory under ~/.matchlock/.
+
+use "os"
+use "str"
+use "color"
+use "fmt"
+use "filepath"
+use "conv"
+use "time"
+
+# Matchlock-specific embedded helpers. Paths are relative to the rugo entry
+# point (yolo.rugo at the repo root), per rugo's `embed` resolution rules.
+embed "backends/matchlock/yolo-export.sh"        as script_export
+embed "backends/matchlock/yolo-import-unpack.sh" as script_import_unpack
+embed "backends/matchlock/yolo-import-retag.sh"  as script_import_retag
+
+# ---------------- Logging (mirrors yolo.rugo's helpers; duplicated so this
+# module can stand alone). ----------------
+def _log(msg)
+  prefix = color.dim("[yolo:matchlock]")
+  puts "#{prefix} #{msg}"
+end
+def _warn(msg)
+  prefix = color.dim("[yolo:matchlock]")
+  puts "#{prefix} #{color.yellow(msg)}"
+end
+def _err(msg)
+  prefix = color.dim("[yolo:matchlock]")
+  puts "#{prefix} #{color.red(msg)}"
+end
+
+# ---------------- list_table ----------------
+# Returns a hash {vm-id => [status, image]} of every VM matchlock knows about.
+def _list_table_impl
+  out = try `matchlock list 2>/dev/null` or ""
+  rows = {}
+  i = 0
+  for line in str.each_line(out)
+    i = i + 1
+    if i == 1
+      # header row
+    else
+      parts = str.fields(line)
+      if len(parts) >= 3
+        rows[parts[0]] = [parts[1], parts[2]]
+      end
+    end
+  end
+  return rows
+end
+
+# ---------------- start ----------------
+# Boot a fresh VM. Returns the new vm-id.
+# opts: {name, image, cpus, mem_mb, disk_mb, workspace, cwd, user, allow, gui}
+def _start_impl(opts)
+  name = opts["name"]
+  img  = opts["image"]
+  ws   = opts["workspace"]
+  cwd  = opts["cwd"]
+
+  user_arg = ""
+  uflag = opts["user"]
+  if uflag != nil && uflag != ""
+    user_arg = "--user #{uflag}"
+  end
+
+  # Only set --allow-host when the allow list is non-empty: passing it triggers
+  # matchlock's MITM proxy, which breaks TLS in the guest (no CA in trust store).
+  allow_arg = ""
+  allow = opts["allow"]
+  if allow != nil && allow != ""
+    allow_arg = "--allow-host \"#{allow}\""
+  end
+
+  # --rm=false is required for `matchlock exec` to work afterwards: ephemeral
+  # (`--rm=true`, the default in some matchlock paths) VMs do not create the
+  # exec relay socket, and the next `matchlock exec <id>` errors out with
+  # `exec socket not found for <id> (was it started with --rm=false?)`. `-d`
+  # alone is documented as equivalent in matchlock's README, but we set both
+  # explicitly so we don't depend on that default.
+  script = <<~SH
+    matchlock run \
+      --image "#{img}" \
+      --workspace "#{ws}" \
+      -v "#{cwd}:.:host_fs" \
+      -w "#{ws}" \
+      --hostname "#{name}" \
+      --cpus #{opts["cpus"]} \
+      --memory #{opts["mem_mb"]} \
+      --disk-size #{opts["disk_mb"]} \
+      #{allow_arg} \
+      #{user_arg} \
+      --rm=false \
+      -d 2>&1
+  SH
+  out = try os.exec(script) or msg
+      _err("matchlock run failed:")
+      puts msg
+      os.exit(1)
+      ""
+    end
+  # matchlock prints "Sandbox vm-xxxx is running" to merged stderr.
+  id = ""
+  for line in str.each_line(out)
+    for word in str.fields(line)
+      if str.starts_with(word, "vm-")
+        id = word
+      end
+    end
+  end
+  if id == ""
+    _err("could not parse vm-id from matchlock output:")
+    puts out
+    os.exit(1)
+  end
+  return id
+end
+
+# ---------------- stop / remove ----------------
+# Matchlock has no resume-from-stopped, so stop() is effectively a kill.
+# yolo.rugo logs the "rebuilds on next attach" caveat at the CLI layer.
+def _stop_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "matchlock kill #{id} >/dev/null 2>&1"` or nil
+end
+
+def _remove_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "matchlock kill #{id} >/dev/null 2>&1"` or nil
+  try `bash -c "matchlock rm   #{id} >/dev/null 2>&1"` or nil
+end
+
+# ---------------- wait_ready ----------------
+# matchlock run -d returns as soon as the VM is *registered* in matchlock's
+# state DB (status="running"), but matchlock then continues setting things up
+# in the background — pulling the OCI image on first use, creating the rootfs
+# overlay, booting the Firecracker VM, and finally creating the exec relay
+# socket. Until that socket exists, `matchlock exec <id>` fails with
+# `exec socket not found for <id> (was it started with --rm=false?)`.
+# Wait for the socket to appear before returning. First-boot can take 30s+
+# because of the image pull, so we tolerate a long deadline.
+EXEC_SOCK_TIMEOUT_S = 120
+def _wait_ready_impl(id)
+  home = os.getenv("HOME")
+  sock = "#{home}/.matchlock/vms/#{id}/exec.sock"
+  start = time.now()
+  notified = false
+  while time.now() - start < EXEC_SOCK_TIMEOUT_S
+    if os.file_exists(sock)
+      return
+    end
+    if !notified && time.now() - start > 3
+      _log("waiting for matchlock exec socket (first boot can take a while)…")
+      notified = true
+    end
+    sleep 0.2
+  end
+  _err("exec.sock did not appear within #{EXEC_SOCK_TIMEOUT_S}s for #{id}")
+  _err("matchlock may still be pulling the image or booting; check `matchlock list`")
+  os.exit(1)
+end
+
+# ---------------- logs ----------------
+def _logs_impl(id, extra)
+  extra_str = str.join(extra, " ")
+  bash -c "matchlock log #{id} #{extra_str}"
+end
+
+# ---------------- exec channels ----------------
+def _exec_provision_impl(id, src, workspace)
+  tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
+  os.write_file(tmp, src)
+  bash -c "cat #{tmp} | matchlock exec #{id} -w #{workspace} -i -u root -- bash"
+  os.remove(tmp)
+end
+
+def _exec_shell_impl(id, workspace, tty)
+  bash -c "matchlock exec #{id} -w #{workspace} #{tty} -- bash -l"
+end
+
+# argv is an already-shell-quoted string (the caller in yolo.rugo built it via
+# shell_join). We splice it into the matchlock-exec command line.
+def _exec_argv_impl(id, workspace, tty, argv)
+  # Use the `bash -c 'exec "$@"' bash arg1 arg2 ...` idiom so we only need
+  # *single-level* shell-quoting per arg. Joining args with str.join and
+  # passing the result as a single `bash -lc '<one-string>'` argument loses
+  # argv boundaries — e.g. `yolo -- sh -c "uname -a; echo X"` would collapse
+  # to `sh -c uname -a; echo X` and bash would re-parse it as `sh -c uname`,
+  # then `-a` (ignored), then `echo X` as a separate command.
+  #
+  # The catch: rugo's shell-fallback wraps `bash -c "<str>"` in another
+  # `sh -c` layer, so embedded `$@`, `$$`, `\"` get eaten by that outer
+  # shell before bash sees them. To avoid this nested-quoting hell, we
+  # write the whole invocation to a temp script and exec that script —
+  # the only thing the rugo shell-fallback sees is `bash <tmpfile>`, with
+  # no shell metacharacters in the path.
+  tmp_script = filepath.join(os.tmp_dir(), "yolo-exec-#{os.pid()}.sh")
+  script_body = <<~SH
+    #!/usr/bin/env bash
+    trap 'rm -f "#{tmp_script}"' EXIT
+    exec matchlock exec #{id} -w #{workspace} #{tty} -- bash -lc 'exec "$@"' bash #{argv}
+  SH
+  os.write_file(tmp_script, script_body)
+  bash -c "bash #{tmp_script}"
+end
+
+# ---------------- disk accounting ----------------
+def _disk_apparent_impl(id)
+  home = os.getenv("HOME")
+  path = "#{home}/.matchlock/vms/#{id}"
+  if !os.file_exists(path)
+    return -1
+  end
+  raw = try `du -sb "#{path}" 2>/dev/null` or ""
+  trimmed = str.trim(raw)
+  if trimmed == ""
+    return -1
+  end
+  fields = str.fields(trimmed)
+  if len(fields) < 1
+    return -1
+  end
+  return conv.to_i(fields[0])
+end
+
+def _disk_real_impl(id)
+  home = os.getenv("HOME")
+  path = "#{home}/.matchlock/vms/#{id}"
+  if !os.file_exists(path)
+    return -1
+  end
+  raw = try `du -s --block-size=1 "#{path}" 2>/dev/null` or ""
+  trimmed = str.trim(raw)
+  if trimmed == ""
+    return -1
+  end
+  fields = str.fields(trimmed)
+  if len(fields) < 1
+    return -1
+  end
+  return conv.to_i(fields[0])
+end
+
+# ---------------- image registry ----------------
+def _image_remove_impl(tag)
+  if tag == "" || tag == nil
+    return
+  end
+  try `bash -c "matchlock image rm #{tag} >/dev/null 2>&1"` or nil
+end
+
+# ---------------- export ----------------
+# opts: {vm_id, name, out, meta_tmp, ap_path, cwd_path, yolofile_src, placeholder}
+# Streams export progress to stdout. Exits non-zero on failure (caller catches).
+def _export_archive_impl(opts)
+  script = "" +
+    "export VM_ID="        + _sh_squote(opts["vm_id"]) + "\n" +
+    "export NAME="         + _sh_squote(opts["name"]) + "\n" +
+    "export OUT="          + _sh_squote(opts["out"]) + "\n" +
+    "export META_TMP="     + _sh_squote(opts["meta_tmp"]) + "\n" +
+    "export AP_PATH="      + _sh_squote(opts["ap_path"]) + "\n" +
+    "export CWD_PATH="     + _sh_squote(opts["cwd_path"]) + "\n" +
+    "export YOLOFILE_SRC=" + _sh_squote(opts["yolofile_src"]) + "\n" +
+    "export PLACEHOLDER="  + _sh_squote(opts["placeholder"]) + "\n" +
+    script_export
+  rc = try os.exec(script) or msg
+      _err("export failed:")
+      puts msg
+      return ""
+    end
+  return rc
+end
+
+# opts: {work, abs} — extracts archive to `work`. Returns "" on failure.
+def _import_unpack_impl(opts)
+  unpack = "" +
+    "export WORK=" + _sh_squote(opts["work"]) + "\n" +
+    "export ABS="  + _sh_squote(opts["abs"]) + "\n" +
+    script_import_unpack
+  rc = try os.exec(unpack) or msg
+      _err("archive extraction failed:")
+      puts msg
+      return ""
+    end
+  return rc
+end
+
+# opts: {work, placeholder, tag} — retags the image.tar inside `work` to `tag`
+# and registers it with matchlock.
+def _import_retag_impl(opts)
+  retag = "" +
+    "export WORK="        + _sh_squote(opts["work"]) + "\n" +
+    "export PLACEHOLDER=" + _sh_squote(opts["placeholder"]) + "\n" +
+    "export TAG="         + _sh_squote(opts["tag"]) + "\n" +
+    script_import_retag
+  rc = try os.exec(retag) or msg
+      _err("matchlock image import failed:")
+      puts msg
+      return ""
+    end
+  return rc
+end
+
+# POSIX shell-quote: wrap in single quotes; escape internal `'` as `'\''`.
+def _sh_squote(s)
+  return "'" + str.replace(s, "'", "'\\''") + "'"
+end
+
+# ---------------- Factory ----------------
+def make
+  be = {}
+  be["NAME"]             = "matchlock"
+  be["SUPPORTS_GUI"]     = false
+  be["SUPPORTS_EXPORT"]  = true
+  be["PERSISTS_ON_STOP"] = false
+  be["DEFAULT_IMAGE"]    = "fedora:44"
+
+  be["list_table"] = fn()
+    return _list_table_impl()
+  end
+  be["start"] = fn(opts)
+    return _start_impl(opts)
+  end
+  be["stop"] = fn(id)
+    _stop_impl(id)
+  end
+  be["resume"] = fn(id)
+    # no-op: matchlock has no resume; ensure_vm() never calls this because
+    # PERSISTS_ON_STOP is false.
+  end
+  be["remove"] = fn(id)
+    _remove_impl(id)
+  end
+  be["wait_ready"] = fn(id)
+    _wait_ready_impl(id)
+  end
+  be["logs"] = fn(id, extra)
+    _logs_impl(id, extra)
+  end
+  be["exec_provision"] = fn(id, src, workspace)
+    _exec_provision_impl(id, src, workspace)
+  end
+  be["exec_shell"] = fn(id, workspace, tty)
+    _exec_shell_impl(id, workspace, tty)
+  end
+  be["exec_argv"] = fn(id, workspace, tty, argv)
+    _exec_argv_impl(id, workspace, tty, argv)
+  end
+  be["disk_apparent"] = fn(id)
+    return _disk_apparent_impl(id)
+  end
+  be["disk_real"] = fn(id)
+    return _disk_real_impl(id)
+  end
+  be["image_remove"] = fn(tag)
+    _image_remove_impl(tag)
+  end
+  be["export_archive"] = fn(opts)
+    return _export_archive_impl(opts)
+  end
+  be["import_unpack"] = fn(opts)
+    return _import_unpack_impl(opts)
+  end
+  be["import_retag"] = fn(opts)
+    return _import_retag_impl(opts)
+  end
+
+  return be
+end

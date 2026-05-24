@@ -28,10 +28,25 @@ use "filepath"
 use "conv"
 use "time"
 
+# ---------------- Backends ----------------
+# Each backend lives at `backends/<name>.rugo` and exposes a `make()` factory
+# returning a handle (hash of constants + closure-valued methods). The
+# contract is documented in backends/INTERFACE.md.
+#
+# Adding a new backend: drop a `backends/<name>.rugo` file, then add it to
+# both the `require` line below and the BACKENDS registry.
+require "backends" with matchlock, podman
+
+BACKENDS = {
+  "matchlock" => matchlock.make(),
+  "podman"    => podman.make()
+}
+DEFAULT_BACKEND = "matchlock"
+
 # ---------------- Embedded provisioners ----------------
 # Each provisioner is a plain bash script that runs INSIDE the guest VM as
-# root, fed through `matchlock exec -i -- bash`. Drop additional ones at
-# provisioners/provisioner-<name>.sh and embed them here.
+# root, piped through the backend's exec_provision channel. Drop additional
+# ones at provisioners/provisioner-<name>.sh and embed them here.
 embed "provisioners/provisioner-fedora-go.sh"      as prov_fedora_go
 embed "provisioners/provisioner-fedora-rust.sh"    as prov_fedora_rust
 embed "provisioners/provisioner-fedora-ruby.sh"    as prov_fedora_ruby
@@ -55,14 +70,6 @@ DEFAULT_PROVISIONER = ""
 embed "provisioners/ai-agents/copilot.sh"  as agent_copilot
 embed "provisioners/ai-agents/opencode.sh" as agent_opencode
 
-# ---------------- Embedded export/import helpers ----------------
-# The heavy lifting for `yolo export` / `yolo import` is shell — we keep it
-# in separate .sh files because rugo's heredoc parser doesn't deal well with
-# the volume of escape sequences and shell parameter expansions involved.
-embed "provisioners/yolo-export.sh"        as script_export
-embed "provisioners/yolo-import-unpack.sh" as script_import_unpack
-embed "provisioners/yolo-import-retag.sh"  as script_import_retag
-
 AI_AGENTS = {
   "copilot"  => agent_copilot,
   "opencode" => agent_opencode
@@ -82,7 +89,7 @@ def env_or(name, fallback)
   return v
 end
 
-IMAGE     = env_or("YOLO_IMAGE",     "fedora:44")
+IMAGE     = env_or("YOLO_IMAGE",     "")
 # Setting YOLO_ALLOW enables matchlock's MITM proxy and restricts egress to the
 # listed hosts. Leave empty (default) for plain NAT — the guest gets real
 # Internet cert chains, so dnf/curl/go-install work out of the box. Once you
@@ -99,15 +106,26 @@ DISK_MB   = env_or("YOLO_DISK_MB",   "32768")
 RUNTIME   = env_or("XDG_RUNTIME_DIR", "/tmp")
 STATE_DIR = filepath.join(RUNTIME, "yolo")
 USER_FLAG = env_or("YOLO_USER", "")
+BACKEND_ENV = env_or("YOLO_BACKEND", "")
 
 # Mutable per-invocation overrides for the VM-creation resource settings.
 # Initialized to the env-var-or-default constants above. Yolofile front matter
 # (parsed in main for vm-creating subcommands) and per-flag CLI overrides
-# (e.g. `--disk-size`) replace these before the first `matchlock run`.
+# (e.g. `--disk-size`) replace these before the first backend `start()` call.
 disk_mb = DISK_MB
 mem_mb  = MEM_MB
 cpus    = CPUS
 image   = IMAGE
+
+# Mutable backend selection. Empty means "let resolve_backend_name() fall back
+# through the cascade". Set by --backend / YOLO_BACKEND / Yolofile front matter
+# before any vm-creating subcommand runs. Sticky bindings (<name>.backend) take
+# precedence over this in resolve_backend_name().
+backend_sel = BACKEND_ENV
+
+# GUI mode requested for this invocation. Honoured by backends where
+# SUPPORTS_GUI is true; refused at the CLI layer otherwise.
+gui_enabled = false
 
 mkdir -p "#{STATE_DIR}"
 
@@ -125,24 +143,66 @@ def err_(msg)
   puts "#{prefix} #{color.red(msg)}"
 end
 
-# ---------------- matchlock helpers ----------------
-# Returns a hash {vm-id => [status, image]} of every VM matchlock knows about.
-def matchlock_table
-  out = try `matchlock list 2>/dev/null` or ""
-  rows = {}
-  i = 0
-  for line in str.each_line(out)
-    i = i + 1
-    if i == 1
-      # header row
-    else
-      parts = str.fields(line)
-      if len(parts) >= 3
-        rows[parts[0]] = [parts[1], parts[2]]
-      end
-    end
+# ---------------- Backend dispatch ----------------
+# Every per-name state file has a sibling <name>.backend recording which
+# backend owns it. read_backend(name) falls back to DEFAULT_BACKEND so
+# pre-existing yolo state (no .backend file) keeps working as matchlock.
+def backend_file(name)
+  return filepath.join(STATE_DIR, "#{name}.backend")
+end
+def read_backend(name)
+  path = backend_file(name)
+  if !os.file_exists(path)
+    return ""
   end
-  return rows
+  return str.trim(os.read_file(path))
+end
+def write_backend(name, b)
+  os.write_file(backend_file(name), b + "\n")
+end
+def remove_backend_file(name)
+  path = backend_file(name)
+  if os.file_exists(path)
+    os.remove(path)
+  end
+end
+
+# Selection cascade (highest wins):
+#   1. <name>.backend if already recorded (sticky once a VM has been created)
+#   2. --backend CLI flag                  (parsed.backend, mutable global)
+#   3. YOLO_BACKEND env var
+#   4. Yolofile front matter `backend:`    (applied to global `backend_sel`
+#      from main, like cpus/mem_mb/etc.)
+#   5. DEFAULT_BACKEND
+def resolve_backend_name(name)
+  existing = read_backend(name)
+  if existing != ""
+    if BACKENDS[existing] == nil
+      err_("name '#{name}' was created with unknown backend '#{existing}' — install it or `yolo rm -n #{name}`")
+      os.exit(1)
+    end
+    return existing
+  end
+  if backend_sel != ""
+    if BACKENDS[backend_sel] == nil
+      err_("unknown backend '#{backend_sel}' (known: #{known_backends()})")
+      os.exit(2)
+    end
+    return backend_sel
+  end
+  return DEFAULT_BACKEND
+end
+
+def backend_for(name)
+  return BACKENDS[resolve_backend_name(name)]
+end
+
+def known_backends
+  names = []
+  for n in BACKENDS
+    names = append(names, n)
+  end
+  return str.join(names, ", ")
 end
 
 def vm_status(id, table)
@@ -154,15 +214,6 @@ def vm_status(id, table)
     return ""
   end
   return row[0]
-end
-
-# Best-effort: stop and remove a vm-id.
-def vm_purge(id)
-  if id == "" || id == nil
-    return
-  end
-  try `bash -c "matchlock kill #{id} >/dev/null 2>&1"` or nil
-  try `bash -c "matchlock rm   #{id} >/dev/null 2>&1"` or nil
 end
 
 # POSIX shell-quote: wrap in single quotes; escape internal `'` as `'\''`.
@@ -183,102 +234,46 @@ end
 
 # Start a fresh VM bound to $name. Returns the new vm-id.
 def start_vm(name)
+  be = backend_for(name)
+  # Refuse incompatible combinations before touching state or logging.
+  if gui_enabled && be.SUPPORTS_GUI == false
+    err_("backend '#{be.NAME}' does not support GUI mode (use --backend podman)")
+    os.exit(2)
+  end
   # Per-name image pin (from `yolo import`) overrides the global default so
-  # an imported VM boots from its custom OCI image instead of fedora:44.
+  # an imported VM boots from its custom OCI image instead of the backend
+  # default. If neither is set, use the global `image` (which may itself
+  # have been set from a Yolofile / env / default).
   img = read_image(name)
   if img == ""
     img = image
   end
-  log("starting #{color.bold(img)} VM #{color.bold(name)} for #{os.cwd()}")
-  user_arg = ""
-  if USER_FLAG != ""
-    user_arg = "--user #{USER_FLAG}"
+  if img == ""
+    img = be.DEFAULT_IMAGE
   end
-  # Only set --allow-host when YOLO_ALLOW is non-empty: passing it triggers
-  # matchlock's MITM proxy, which breaks TLS in the guest (no CA in trust store).
-  allow_arg = ""
-  if ALLOW != ""
-    allow_arg = "--allow-host \"#{ALLOW}\""
-  end
-  cwd = os.cwd()
-  # --rm=false is required for `matchlock exec` to work afterwards: ephemeral
-  # (`--rm=true`, the default in some matchlock paths) VMs do not create the
-  # exec relay socket, and the next `matchlock exec <id>` errors out with
-  # `exec socket not found for <id> (was it started with --rm=false?)`. `-d`
-  # alone is documented as equivalent in matchlock's README, but we set both
-  # explicitly so we don't depend on that default.
-  script = <<~SH
-    matchlock run \
-      --image "#{img}" \
-      --workspace "#{WORKSPACE}" \
-      -v "#{cwd}:.:host_fs" \
-      -w "#{WORKSPACE}" \
-      --hostname "#{name}" \
-      --cpus #{cpus} \
-      --memory #{mem_mb} \
-      --disk-size #{disk_mb} \
-      #{allow_arg} \
-      #{user_arg} \
-      --rm=false \
-      -d 2>&1
-  SH
-  out = try os.exec(script) or msg
-      err_("matchlock run failed:")
-      puts msg
-      os.exit(1)
-      ""
-    end
-  # matchlock prints "Sandbox vm-xxxx is running" to merged stderr.
-  id = ""
-  for line in str.each_line(out)
-    for word in str.fields(line)
-      if str.starts_with(word, "vm-")
-        id = word
-      end
-    end
-  end
-  if id == ""
-    err_("could not parse vm-id from matchlock output:")
-    puts out
-    os.exit(1)
-  end
+  log("starting #{color.bold(img)} VM #{color.bold(name)} for #{os.cwd()} [#{be.NAME}]")
+  opts = {
+    "name"      => name,
+    "image"     => img,
+    "cpus"      => cpus,
+    "mem_mb"    => mem_mb,
+    "disk_mb"   => disk_mb,
+    "workspace" => WORKSPACE,
+    "cwd"       => os.cwd(),
+    "user"      => USER_FLAG,
+    "allow"     => ALLOW,
+    "gui"       => gui_enabled
+  }
+  id = be.start(opts)
   os.write_file(state_file(name), id)
+  write_backend(name, be.NAME)
   record_cwd(name)
   # If an imported `.applied` file is waiting with the __IMPORTED__ sentinel,
   # rewrite its first line to the new vm-id so the markers stick to this VM
   # and provisioners skip re-running (their effects are already in the image).
   rebind_imported_applied(name, id)
-  wait_exec_ready(id)
+  be.wait_ready(id)
   return id
-end
-
-# matchlock run -d returns as soon as the VM is *registered* in matchlock's
-# state DB (status="running"), but matchlock then continues setting things up
-# in the background — pulling the OCI image on first use, creating the rootfs
-# overlay, booting the Firecracker VM, and finally creating the exec relay
-# socket. Until that socket exists, `matchlock exec <id>` fails with
-# `exec socket not found for <id> (was it started with --rm=false?)`.
-# Wait for the socket to appear before returning. First-boot can take 30s+
-# because of the image pull, so we tolerate a long deadline.
-EXEC_SOCK_TIMEOUT_S = 120
-def wait_exec_ready(id)
-  home = os.getenv("HOME")
-  sock = "#{home}/.matchlock/vms/#{id}/exec.sock"
-  start = time.now()
-  notified = false
-  while time.now() - start < EXEC_SOCK_TIMEOUT_S
-    if os.file_exists(sock)
-      return
-    end
-    if !notified && time.now() - start > 3
-      log("waiting for matchlock exec socket (first boot can take a while)…")
-      notified = true
-    end
-    sleep 0.2
-  end
-  err_("exec.sock did not appear within #{EXEC_SOCK_TIMEOUT_S}s for #{id}")
-  err_("matchlock may still be pulling the image or booting; check `matchlock list`")
-  os.exit(1)
 end
 
 def state_file(name)
@@ -493,11 +488,23 @@ def release_lock(name)
 end
 
 # Ensure a running VM bound to $name; auto-heal stopped/missing.
+# Behavior depends on the backend's PERSISTS_ON_STOP capability:
+#   - false (matchlock): anything not "running" => recreate from scratch.
+#   - true  (podman):    a stopped/exited container is resumed via be.resume()
+#                        which preserves in-container state; recreation only
+#                        happens when the binding is missing entirely.
 def ensure_vm(name)
   id = read_state(name)
-  table = matchlock_table()
+  be = backend_for(name)
+  table = be.list_table()
   status = vm_status(id, table)
   if status == "running"
+    return id
+  end
+  if status != "" && be.PERSISTS_ON_STOP == true && id != ""
+    log("resuming stopped #{id} for '#{name}'")
+    be.resume(id)
+    be.wait_ready(id)
     return id
   end
   if status == ""
@@ -507,7 +514,7 @@ def ensure_vm(name)
     end
   else
     warn("VM #{id} is in state '#{status}'; recreating")
-    vm_purge(id)
+    be.remove(id)
     os.remove(state_file(name))
   end
   return start_vm(name)
@@ -550,7 +557,7 @@ def parse_disk_size(s)
 end
 
 # Parse a flat argv into: subcommand, -n name, --provisioner, --ai-agent,
-# rest, -- passthrough.
+# --backend, --gui / --no-gui, rest, -- passthrough.
 def parse_args(args)
   sub = ""
   name = ""
@@ -564,6 +571,9 @@ def parse_args(args)
   out_path = ""
   force = false
   disk_mb_override = ""
+  backend = ""
+  gui = false
+  gui_set = false
   i = 0
   while i < len(args)
     a = args[i]
@@ -584,6 +594,19 @@ def parse_args(args)
       out_path = args[i]
     elsif a == "--force"
       force = true
+    elsif a == "--backend" || a == "-b"
+      i = i + 1
+      if i >= len(args)
+        err_("--backend requires a value (matchlock or podman)")
+        os.exit(2)
+      end
+      backend = args[i]
+    elsif a == "--gui"
+      gui = true
+      gui_set = true
+    elsif a == "--no-gui"
+      gui = false
+      gui_set = true
     elsif a == "--disk-size"
       i = i + 1
       if i >= len(args)
@@ -632,7 +655,7 @@ def parse_args(args)
     end
     i = i + 1
   end
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb_override}
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb_override, backend: backend, gui: gui, gui_set: gui_set}
 end
 
 def print_version
@@ -640,7 +663,7 @@ def print_version
 end
 
 def print_help
-  puts "yolo — fast persistent matchlock VMs, one per directory."
+  puts "yolo — fast persistent per-directory dev environments (matchlock VMs or podman containers)."
   puts ""
   puts "Usage:"
   puts "  yolo                            Ensure VM, auto-provision (once), shell in."
@@ -649,6 +672,13 @@ def print_help
   puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
   puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode)."
   puts "                                  Known agents: copilot, opencode."
+  puts "  yolo --backend NAME [...]       Pick a backend: matchlock (microVM, default)"
+  puts "                                  or podman (container, supports GUI). The"
+  puts "                                  binding is sticky: once a VM is created the"
+  puts "                                  backend is recorded and re-used on attach."
+  puts "  yolo --gui [...]                Bind-mount the host Wayland socket into the"
+  puts "                                  guest so graphical apps render on your"
+  puts "                                  compositor. Requires --backend podman."
   puts "  yolo -n NAME [...]              Use a named VM."
   puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."
   puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
@@ -658,7 +688,7 @@ def print_help
   puts "  yolo -h, --help                 Print this help and exit."
   puts "  yolo ls                         List tracked VMs with live status."
   puts "  yolo du                         List tracked VMs with disk usage."
-  puts "  yolo stop [-n NAME]             Stop VM."
+  puts "  yolo stop [-n NAME]             Stop VM (podman: preserves state)."
   puts "  yolo rm   [-n NAME]             Stop + remove VM and binding."
   puts "  yolo logs [-n NAME]             Show VM log."
   puts "  yolo id   [-n NAME]             Print vm-id."
@@ -669,7 +699,7 @@ def print_help
   puts "  yolo provisioners               List provisioners (embedded + ./Yolofile)."
   puts ""
   puts "  yolo export [-n NAME] [-o FILE] Export VM rootfs + state into a single"
-  puts "                                  .tar.gz (default: ./yolo-export-<n>-<ts>.tar.gz)."
+  puts "                                  .tar.gz (matchlock backend only)."
   puts "  yolo import FILE [-n NAME] [--force]"
   puts "                                  Import an export bundle; pins a custom"
   puts "                                  matchlock image so the first `yolo -n NAME`"
@@ -689,18 +719,19 @@ def print_help
   puts "  A plain bash script (run as root in the VM). Edit-and-rerun"
   puts "  automatically re-provisions (content-hashed for the marker)."
   puts "  May begin with a YAML-style '---' front matter block declaring"
-  puts "  VM-creation overrides (image, cpus, memory, disk-size). See"
-  puts "  docs/05-yolofile.md for the full format."
+  puts "  VM-creation overrides (image, cpus, memory, disk-size, backend,"
+  puts "  gui). See docs/05-yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
-  puts "  YOLO_IMAGE=fedora:44       OCI image"
+  puts "  YOLO_IMAGE=fedora:44       OCI image (default depends on backend)"
   puts "  YOLO_CPUS=2                vCPU count"
   puts "  YOLO_MEM_MB=2048           Memory (MiB)"
-  puts "  YOLO_DISK_MB=32768         Rootfs disk (MiB)"
+  puts "  YOLO_DISK_MB=32768         Rootfs disk (MiB) (matchlock only)"
   puts "  YOLO_WORKSPACE=/work       Guest mount point for $PWD"
   puts "  YOLO_ALLOW=                Comma list of allow-listed hosts (enables MITM)"
   puts "  YOLO_USER=                 Run as uid:gid inside guest"
   puts "  YOLO_NAME=                 Override the auto-derived per-CWD name"
+  puts "  YOLO_BACKEND=              Default backend (matchlock or podman)"
 end
 
 def default_name
@@ -726,8 +757,32 @@ def display_path(p)
   return p
 end
 
+# Build a {backend_name => list_table} cache so multi-name commands (ls, du,
+# prune) make at most one runtime call per backend even when names span
+# different backends.
+def collect_tables
+  out = {}
+  files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
+  for f in files
+    n = str.trim_suffix(filepath.base(f), ".vmid")
+    bn = read_backend(n)
+    if bn == ""
+      bn = DEFAULT_BACKEND
+    end
+    if out[bn] == nil
+      be = BACKENDS[bn]
+      if be == nil
+        out[bn] = {}
+      else
+        out[bn] = be.list_table()
+      end
+    end
+  end
+  return out
+end
+
 def cmd_ls
-  table = matchlock_table()
+  tables = collect_tables()
   printf_hdr()
   seen = {}
   files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
@@ -735,6 +790,14 @@ def cmd_ls
     n = str.trim_suffix(filepath.base(f), ".vmid")
     seen[n] = true
     id = str.trim(os.read_file(f))
+    bn = read_backend(n)
+    if bn == ""
+      bn = DEFAULT_BACKEND
+    end
+    table = tables[bn]
+    if table == nil
+      table = {}
+    end
     row = table[id]
     if row == nil
       st = "gone"
@@ -783,7 +846,8 @@ def cmd_stop(name)
     warn("no VM tracked for '#{name}'")
     return
   end
-  out = try `bash -c "matchlock kill #{id} 2>&1"` or "already stopped"
+  be = backend_for(name)
+  be.stop(id)
   log("stopped #{id} (#{name})")
 end
 
@@ -794,8 +858,9 @@ def cmd_rm(name)
     warn("no VM tracked for '#{name}'")
     return
   end
+  be = backend_for(name)
   if id != ""
-    vm_purge(id)
+    be.remove(id)
     os.remove(state_file(name))
   end
   ap = applied_file(name)
@@ -807,15 +872,17 @@ def cmd_rm(name)
     os.remove(cf)
   end
   remove_image(name)
-  # If the pinned image was created by `yolo import`, drop it from matchlock's
-  # image store too — but only when no other yolo name still pins the same tag.
-  # We restrict this to yolo-import/* to avoid removing user-supplied images.
+  # If the pinned image was created by `yolo import`, drop it from the
+  # backend's image store too — but only when no other yolo name still pins
+  # the same tag. We restrict this to yolo-import/* to avoid removing
+  # user-supplied images.
   if pinned_image != "" && str.starts_with(pinned_image, "yolo-import/")
     if !image_pinned_elsewhere(pinned_image)
-      try `bash -c "matchlock image rm #{pinned_image} >/dev/null 2>&1"` or nil
+      be.image_remove(pinned_image)
       log("removed imported image #{pinned_image}")
     end
   end
+  remove_backend_file(name)
   # Best-effort: drop any stale lock dir for this name.
   ld = lock_dir(name)
   try `bash -c "rm -rf #{ld}"` or nil
@@ -827,8 +894,8 @@ def cmd_rm(name)
 end
 
 # Scan all *.image state files to see if any name pins `tag`. Used to decide
-# whether `matchlock image rm` is safe in cmd_rm (we call this AFTER removing
-# the binding for the name being deleted, so a `true` result means another
+# whether `image_remove` is safe in cmd_rm (we call this AFTER removing the
+# binding for the name being deleted, so a `true` result means another
 # binding still references it).
 def image_pinned_elsewhere(tag)
   files = try filepath.glob(filepath.join(STATE_DIR, "*.image")) or []
@@ -847,8 +914,8 @@ def cmd_logs(name, extra)
     err_("no VM tracked for '#{name}'")
     os.exit(1)
   end
-  extra_str = str.join(extra, " ")
-  bash -c "matchlock log #{id} #{extra_str}"
+  be = backend_for(name)
+  be.logs(id, extra)
 end
 
 def cmd_id(name)
@@ -869,7 +936,8 @@ def cmd_status(name)
     end
     return
   end
-  table = matchlock_table()
+  be = backend_for(name)
+  table = be.list_table()
   st = vm_status(id, table)
   if st == ""
     st = "gone"
@@ -889,11 +957,19 @@ end
 
 def cmd_prune
   files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
-  table = matchlock_table()
+  tables = collect_tables()
   for f in files
     id = str.trim(os.read_file(f))
+    n = str.trim_suffix(filepath.base(f), ".vmid")
+    bn = read_backend(n)
+    if bn == ""
+      bn = DEFAULT_BACKEND
+    end
+    table = tables[bn]
+    if table == nil
+      table = {}
+    end
     if vm_status(id, table) == ""
-      n = str.trim_suffix(filepath.base(f), ".vmid")
       log("pruning #{n} → #{id} (gone)")
       os.remove(f)
       ap = applied_file(n)
@@ -904,6 +980,7 @@ def cmd_prune
       if os.file_exists(cf)
         os.remove(cf)
       end
+      remove_backend_file(n)
     end
   end
 end
@@ -925,48 +1002,8 @@ def human_bytes(n)
   return fmt.sprintf("%.2f GiB", g)
 end
 
-# Apparent size (sparse-aware OFF): what `du -sb` reports — for matchlock VMs
-# this is dominated by the upper.ext4 logical size = YOLO_DISK_MB.
-def vm_disk_apparent(home, id)
-  path = "#{home}/.matchlock/vms/#{id}"
-  if !os.file_exists(path)
-    return -1
-  end
-  raw = try `du -sb "#{path}" 2>/dev/null` or ""
-  trimmed = str.trim(raw)
-  if trimmed == ""
-    return -1
-  end
-  fields = str.fields(trimmed)
-  if len(fields) < 1
-    return -1
-  end
-  return conv.to_i(fields[0])
-end
-
-# Real allocated bytes on the host filesystem (sparse-aware). For a typical
-# matchlock VM this is much less than the apparent size because upper.ext4
-# is a sparse file.
-def vm_disk_real(home, id)
-  path = "#{home}/.matchlock/vms/#{id}"
-  if !os.file_exists(path)
-    return -1
-  end
-  raw = try `du -s --block-size=1 "#{path}" 2>/dev/null` or ""
-  trimmed = str.trim(raw)
-  if trimmed == ""
-    return -1
-  end
-  fields = str.fields(trimmed)
-  if len(fields) < 1
-    return -1
-  end
-  return conv.to_i(fields[0])
-end
-
 def cmd_du
-  home = os.getenv("HOME")
-  table = matchlock_table()
+  tables = collect_tables()
   fmt.printf("%-25s  %-20s  %-10s  %-12s  %s\n", "NAME", "VM-ID", "STATUS", "USED", "ALLOCATED")
   files = try filepath.glob(filepath.join(STATE_DIR, "*.vmid")) or []
   total_real = 0
@@ -974,8 +1011,17 @@ def cmd_du
   for f in files
     n = str.trim_suffix(filepath.base(f), ".vmid")
     id = str.trim(os.read_file(f))
-    real_b = vm_disk_real(home, id)
-    app_b  = vm_disk_apparent(home, id)
+    bn = read_backend(n)
+    if bn == ""
+      bn = DEFAULT_BACKEND
+    end
+    be = BACKENDS[bn]
+    real_b = -1
+    app_b  = -1
+    if be != nil
+      real_b = be.disk_real(id)
+      app_b  = be.disk_apparent(id)
+    end
     if real_b < 0
       real_str = color.dim(fmt.sprintf("%-12s", "—"))
     else
@@ -987,6 +1033,10 @@ def cmd_du
     else
       total_app = total_app + app_b
       app_str = human_bytes(app_b)
+    end
+    table = tables[bn]
+    if table == nil
+      table = {}
     end
     st = vm_status(id, table)
     if st == ""
@@ -1014,6 +1064,7 @@ end
 def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
   acquire_lock(name, "setup")
   id = ensure_vm(name)
+  be = backend_for(name)
 
   if !no_prov
     # Resolve once. marker is content-hashed so source edits trigger a re-run.
@@ -1042,7 +1093,7 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
     agent_short = str.slice(crypto.sha256(agent_src), 0, 12)
     agent_marker = "ai-agent:#{agent_name}:#{agent_short}"
     if !is_applied(name, id, agent_marker)
-      apply_agent(id, agent_name)
+      apply_agent(id, agent_name, name)
       mark_applied(name, id, agent_marker)
     end
   end
@@ -1068,30 +1119,10 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
   end
 
   if len(passthrough) == 0
-    bash -c "matchlock exec #{id} -w #{WORKSPACE} #{it_flag} -- bash -l"
+    be.exec_shell(id, WORKSPACE, it_flag)
   else
-    # Use the `bash -c 'exec "$@"' bash arg1 arg2 ...` idiom so we only need
-    # *single-level* shell-quoting per arg. Joining args with str.join and
-    # passing the result as a single `bash -lc '<one-string>'` argument loses
-    # argv boundaries — e.g. `yolo -- sh -c "uname -a; echo X"` would collapse
-    # to `sh -c uname -a; echo X` and bash would re-parse it as `sh -c uname`,
-    # then `-a` (ignored), then `echo X` as a separate command.
-    #
-    # The catch: rugo's shell-fallback wraps `bash -c "<str>"` in another
-    # `sh -c` layer, so embedded `$@`, `$$`, `\"` get eaten by that outer
-    # shell before bash sees them. To avoid this nested-quoting hell, we
-    # write the whole invocation to a temp script and exec that script —
-    # the only thing the rugo shell-fallback sees is `bash <tmpfile>`, with
-    # no shell metacharacters in the path.
     argv = shell_join(passthrough)
-    tmp_script = filepath.join(os.tmp_dir(), "yolo-exec-#{os.pid()}.sh")
-    script_body = <<~SH
-      #!/usr/bin/env bash
-      trap 'rm -f "#{tmp_script}"' EXIT
-      exec matchlock exec #{id} -w #{WORKSPACE} #{it_flag} -- bash -lc 'exec "$@"' bash #{argv}
-    SH
-    os.write_file(tmp_script, script_body)
-    bash -c "bash #{tmp_script}"
+    be.exec_argv(id, WORKSPACE, it_flag, argv)
   end
 end
 
@@ -1265,8 +1296,8 @@ end
 # Implemented inline-ish via a hash return; the caller does the actual
 # assignments because rugo functions cannot mutate module-level variables.
 def validate_frontmatter(fm)
-  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false}
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true}
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true}
   for k in fm
     if known[k] != true
       warn("Yolofile: ignoring unknown front matter key '#{k}'")
@@ -1316,6 +1347,28 @@ def validate_frontmatter(fm)
       os.exit(2)
     end
     out.disk_mb = sz
+  end
+  v_backend = fm["backend"]
+  if v_backend != nil && v_backend != ""
+    if BACKENDS[v_backend] == nil
+      err_("Yolofile: unknown 'backend' value: '#{v_backend}' (known: #{known_backends()})")
+      os.exit(2)
+    end
+    out.backend = v_backend
+  end
+  v_gui = fm["gui"]
+  if v_gui != nil && v_gui != ""
+    lv = str.lower(v_gui)
+    if lv == "true" || lv == "yes" || lv == "1" || lv == "on"
+      out.gui = true
+      out.gui_set = true
+    elsif lv == "false" || lv == "no" || lv == "0" || lv == "off"
+      out.gui = false
+      out.gui_set = true
+    else
+      err_("Yolofile: invalid 'gui' value: '#{v_gui}' (expected true/false)")
+      os.exit(2)
+    end
   end
   v_agent = fm["ai_agent"]
   if v_agent != nil
@@ -1456,17 +1509,16 @@ def apply_provisioner(name, vm_id, prov_name)
     os.exit(1)
   end
 
-  tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
-  os.write_file(tmp, src)
+  be = backend_for(name)
   log("applying #{color.bold(display)} to #{color.bold(vm_id)}")
-  bash -c "cat #{tmp} | matchlock exec #{vm_id} -w #{WORKSPACE} -i -u root -- bash"
-  os.remove(tmp)
+  be.exec_provision(vm_id, src, WORKSPACE)
   return marker
 end
 
 # Install an AI agent inside the guest. Same shape as apply_provisioner but
 # uses the AI_AGENTS registry. Returns the marker name ("ai-agent:NAME").
-def apply_agent(vm_id, agent_name)
+# `name` is the yolo binding (used to resolve the backend).
+def apply_agent(vm_id, agent_name, name)
   src = AI_AGENTS[agent_name]
   if src == nil || src == ""
     err_("unknown ai-agent '#{agent_name}'")
@@ -1476,11 +1528,9 @@ def apply_agent(vm_id, agent_name)
     end
     os.exit(1)
   end
-  tmp = "/tmp/yolo-agent-#{os.pid()}.sh"
-  os.write_file(tmp, src)
+  be = backend_for(name)
   log("installing ai-agent #{color.bold(agent_name)} into #{color.bold(vm_id)}")
-  bash -c "cat #{tmp} | matchlock exec #{vm_id} -w #{WORKSPACE} -i -u root -- bash"
-  os.remove(tmp)
+  be.exec_provision(vm_id, src, WORKSPACE)
   return "ai-agent:#{agent_name}"
 end
 
@@ -1561,13 +1611,6 @@ def json_escape(s)
   return out
 end
 
-# Wrap s in single quotes so the shell sees a literal value, escaping any
-# embedded single quotes with the classic '\'' trick. Used to splice rugo
-# values into the export/import shell preambles safely.
-def sh_squote(s)
-  return "'" + str.replace(s, "'", "'\\''") + "'"
-end
-
 def cmd_export(name, out_path)
   acquire_lock(name, "export")
   id = read_state(name)
@@ -1577,10 +1620,18 @@ def cmd_export(name, out_path)
     os.exit(1)
   end
 
-  # We need the VM running for `matchlock exec`. Auto-heal if needed: this
-  # may recreate the VM from its (pinned) image, which is the right thing —
-  # an export of a stopped/missing VM would otherwise have nothing to capture.
-  table = matchlock_table()
+  be = backend_for(name)
+  if !be.SUPPORTS_EXPORT
+    err_("backend '#{be.NAME}' does not support export/import")
+    release_lock(name)
+    os.exit(2)
+  end
+
+  # We need the VM running for the in-guest tar streaming. Auto-heal if
+  # needed: this may recreate the VM from its (pinned) image, which is the
+  # right thing — an export of a stopped/missing VM would otherwise have
+  # nothing to capture.
+  table = be.list_table()
   st = vm_status(id, table)
   if st != "running"
     warn("VM '#{name}' (#{id}) is '#{st}'; recreating to export")
@@ -1638,6 +1689,7 @@ def cmd_export(name, out_path)
     "  \"exported_at\": \"#{json_escape(ts_iso)}\",\n" +
     "  \"source_host\": \"#{json_escape(hostname)}\",\n" +
     "  \"name\": \"#{json_escape(name)}\",\n" +
+    "  \"backend\": \"#{json_escape(be.NAME)}\",\n" +
     "  \"src_vm_id\": \"#{json_escape(id)}\",\n" +
     "  \"src_image\": \"#{json_escape(src_image)}\",\n" +
     "  \"cwd\": \"#{json_escape(cwd_disp)}\",\n" +
@@ -1652,32 +1704,24 @@ def cmd_export(name, out_path)
   meta_tmp = "/tmp/yolo-export-meta-#{os.pid()}.json"
   os.write_file(meta_tmp, meta)
 
-  # Stage in a tempdir. The actual heavy lifting (in-guest tar streaming,
-  # docker-save tarball construction, final compression) lives in an embedded
-  # bash script (provisioners/yolo-export.sh) so we can use `set -euo
-  # pipefail` and trap-cleanup the tempdir.
   ap_path = applied_file(name)
   cwd_path = cwd_file(name)
   log("exporting #{color.bold(name)} (#{id}) → #{color.bold(out)}")
-  script = "" +
-    "export VM_ID="        + sh_squote(id) + "\n" +
-    "export NAME="         + sh_squote(name) + "\n" +
-    "export OUT="          + sh_squote(out) + "\n" +
-    "export META_TMP="     + sh_squote(meta_tmp) + "\n" +
-    "export AP_PATH="      + sh_squote(ap_path) + "\n" +
-    "export CWD_PATH="     + sh_squote(cwd_path) + "\n" +
-    "export YOLOFILE_SRC=" + sh_squote(yolofile_src) + "\n" +
-    "export PLACEHOLDER="  + sh_squote(EXPORT_PLACEHOLDER_TAG) + "\n" +
-    script_export
-
-  rc = try os.exec(script) or msg
-      err_("export failed:")
-      puts msg
-      try os.remove(meta_tmp) or nil
-      release_lock(name)
-      os.exit(1)
-      ""
-    end
+  rc = be.export_archive({
+    "vm_id"        => id,
+    "name"         => name,
+    "out"          => out,
+    "meta_tmp"     => meta_tmp,
+    "ap_path"      => ap_path,
+    "cwd_path"     => cwd_path,
+    "yolofile_src" => yolofile_src,
+    "placeholder"  => EXPORT_PLACEHOLDER_TAG
+  })
+  if rc == ""
+    try os.remove(meta_tmp) or nil
+    release_lock(name)
+    os.exit(1)
+  end
   puts rc
   try os.remove(meta_tmp) or nil
   release_lock(name)
@@ -1701,7 +1745,10 @@ def cmd_import(in_path, name_override, force)
     abs = in_path
   end
 
-  # Extract to a fresh tempdir, hardened against path traversal.
+  # Extract to a fresh tempdir, hardened against path traversal. We use the
+  # matchlock backend's helper for now — the archive format is matchlock's
+  # (docker-save tarball), so this is correct. A future podman backend
+  # would either reuse the same on-disk format or add format detection.
   work_raw = try `bash -c "mktemp -d -t yolo-import-XXXXXX"` or ""
   work = str.trim(work_raw)
   if work == ""
@@ -1709,17 +1756,20 @@ def cmd_import(in_path, name_override, force)
     os.exit(1)
   end
 
-  unpack = "" +
-    "export WORK=" + sh_squote(work) + "\n" +
-    "export ABS="  + sh_squote(abs) + "\n" +
-    script_import_unpack
-  rc = try os.exec(unpack) or msg
-      err_("archive extraction failed:")
-      puts msg
-      try `bash -c "rm -rf #{work}"` or nil
-      os.exit(1)
-      ""
-    end
+  be = BACKENDS["matchlock"]
+  if be == nil
+    err_("matchlock backend not registered — cannot import")
+    os.exit(1)
+  end
+
+  rc = be.import_unpack({
+    "work" => work,
+    "abs"  => abs
+  })
+  if rc == ""
+    try `bash -c "rm -rf #{work}"` or nil
+    os.exit(1)
+  end
 
   # Parse metadata (cheap line-based extraction — we only need a few fields,
   # and we don't trust the values for anything except display + name default).
@@ -1731,8 +1781,16 @@ def cmd_import(in_path, name_override, force)
   meta_host = json_string_field(meta_raw, "source_host")
   meta_ts   = json_string_field(meta_raw, "exported_at")
   meta_schema = json_string_field(meta_raw, "schema_version")
+  meta_backend = json_string_field(meta_raw, "backend")
   if meta_schema != "1"
     err_("unsupported export schema_version '#{meta_schema}' (expected 1)")
+    try `bash -c "rm -rf #{work}"` or nil
+    os.exit(1)
+  end
+  # Backend field was added later; missing means matchlock. Reject archives
+  # that originated on a different backend than what's available locally.
+  if meta_backend != "" && meta_backend != "matchlock"
+    err_("archive was exported from backend '#{meta_backend}' — import is matchlock-only")
     try `bash -c "rm -rf #{work}"` or nil
     os.exit(1)
   end
@@ -1773,24 +1831,22 @@ def cmd_import(in_path, name_override, force)
   acquire_lock(target, "import")
 
   # Re-tag image.tar's manifest + repositories to the destination tag, then
-  # hand it to matchlock.
-  retag = "" +
-    "export WORK="        + sh_squote(work) + "\n" +
-    "export PLACEHOLDER=" + sh_squote(EXPORT_PLACEHOLDER_TAG) + "\n" +
-    "export TAG="         + sh_squote(tag) + "\n" +
-    script_import_retag
-  rc = try os.exec(retag) or msg
-      err_("matchlock image import failed:")
-      puts msg
-      try `bash -c "rm -rf #{work}"` or nil
-      release_lock(target)
-      os.exit(1)
-      ""
-    end
+  # hand it to the matchlock image store.
+  rc = be.import_retag({
+    "work"        => work,
+    "placeholder" => EXPORT_PLACEHOLDER_TAG,
+    "tag"         => tag
+  })
+  if rc == ""
+    try `bash -c "rm -rf #{work}"` or nil
+    release_lock(target)
+    os.exit(1)
+  end
   puts rc
 
-  # Pin the image for this name and stash the cwd for display.
+  # Pin the image for this name and stash the cwd + backend for display.
   write_image(target, tag)
+  write_backend(target, "matchlock")
   if meta_cwd != ""
     os.write_file(cwd_file(target), meta_cwd)
   end
@@ -1918,6 +1974,12 @@ if applies_resources && has_yolofile()
   if fm_resolved.disk_mb != ""
     disk_mb = fm_resolved.disk_mb
   end
+  if fm_resolved.backend != ""
+    backend_sel = fm_resolved.backend
+  end
+  if fm_resolved.gui_set
+    gui_enabled = fm_resolved.gui
+  end
   # CLI --ai-agent / --no-ai-agent wins; otherwise honour Yolofile front matter.
   if !parsed.agent_set && fm_resolved.agent_set
     parsed.agent = fm_resolved.agent
@@ -1927,6 +1989,20 @@ end
 # CLI flag overrides run last so they win over both env vars and Yolofile.
 if parsed.disk_mb != ""
   disk_mb = parsed.disk_mb
+end
+if parsed.backend != ""
+  backend_sel = parsed.backend
+end
+if parsed.gui_set
+  gui_enabled = parsed.gui
+end
+
+# Validate backend_sel early (only for vm-creating subcommands) so an unknown
+# name fails fast with a friendly message instead of erroring deep inside
+# resolve_backend_name().
+if backend_sel != "" && BACKENDS[backend_sel] == nil
+  err_("unknown backend '#{backend_sel}' (known: #{known_backends()})")
+  os.exit(2)
 end
 
 name = parsed.name

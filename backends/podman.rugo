@@ -1,0 +1,394 @@
+# backends/podman.rugo — podman backend for yolo.
+#
+# Implements the contract documented in backends/INTERFACE.md.
+#
+# Differences from the matchlock backend:
+#   - Containers, not microVMs. Boot is ~1s; provisioning runs in the
+#     container.
+#   - `stop` preserves in-container state. PERSISTS_ON_STOP=true.
+#   - GUI mode bind-mounts the host's Wayland socket (`$WAYLAND_DISPLAY`)
+#     into the container so graphical apps render on the host compositor.
+#     X11 is intentionally NOT supported.
+#   - No export/import (matchlock-specific archive format).
+#
+# Container naming: `yolo-<binding>`. We filter list_table() to only
+# yolo-owned containers so we don't collide with the user's other podman
+# work.
+
+use "os"
+use "str"
+use "color"
+use "fmt"
+use "filepath"
+use "conv"
+use "time"
+
+# Container name prefix used to distinguish yolo-managed containers from the
+# user's own podman containers. list_table() filters on this prefix.
+NAME_PREFIX = "yolo-"
+
+# ---------------- Logging ----------------
+def _log(msg)
+  prefix = color.dim("[yolo:podman]")
+  puts "#{prefix} #{msg}"
+end
+def _warn(msg)
+  prefix = color.dim("[yolo:podman]")
+  puts "#{prefix} #{color.yellow(msg)}"
+end
+def _err(msg)
+  prefix = color.dim("[yolo:podman]")
+  puts "#{prefix} #{color.red(msg)}"
+end
+
+# POSIX shell-quote.
+def _sh_squote(s)
+  return "'" + str.replace(s, "'", "'\\''") + "'"
+end
+
+# ---------------- list_table ----------------
+# Returns {name => [status, image]} for yolo-prefixed containers. Status is
+# normalized to "running" or "exited" (matching matchlock's vocabulary closely
+# enough for yolo's state machine).
+def _list_table_impl
+  # Tab-separated output for unambiguous parsing. We use a sentinel separator
+  # rather than relying on column alignment.
+  cmd = "podman ps -a --filter name=^#{NAME_PREFIX} --format '{{.Names}}\\t{{.State}}\\t{{.Image}}' 2>/dev/null"
+  out = try `bash -c "#{cmd}"` or ""
+  rows = {}
+  for line in str.each_line(out)
+    t = str.trim(line)
+    if t == ""
+      # skip blank lines
+    else
+      parts = str.split(t, "\t")
+      if len(parts) >= 3
+        name = parts[0]
+        state = parts[1]
+        image = parts[2]
+        # Podman's .State is one of: running, exited, created, paused, stopping…
+        # Normalize to a small vocabulary that vm_status() can reason about.
+        norm = state
+        if state == "running"
+          norm = "running"
+        elsif state == "exited" || state == "created" || state == "stopped"
+          norm = "exited"
+        end
+        rows[name] = [norm, image]
+      end
+    end
+  end
+  return rows
+end
+
+# ---------------- start ----------------
+# Boot a fresh container. Returns the container name (which is also yolo's id
+# for this backend).
+def _start_impl(opts)
+  name      = opts["name"]
+  cname     = NAME_PREFIX + name
+  img       = opts["image"]
+  ws        = opts["workspace"]
+  cwd       = opts["cwd"]
+  gui       = opts["gui"]
+
+  # Remove a stale container with the same name. Idempotent — `podman rm`
+  # exits 1 if the name doesn't exist, which we swallow.
+  try `bash -c "podman rm -f #{cname} >/dev/null 2>&1"` or nil
+
+  # Build the run command. We use long-running `sleep infinity` as PID 1 so
+  # the container stays alive and provides a stable target for `podman exec`.
+  # Equivalent to matchlock's "boot and idle" model.
+  user_arg = ""
+  uflag = opts["user"]
+  if uflag != nil && uflag != ""
+    user_arg = "--user #{uflag}"
+  end
+
+  gui_args = ""
+  if gui == true
+    gui_args = _build_gui_args()
+  end
+
+  # Hostname inside the container. Podman defaults to the container id;
+  # set it to the binding name for prettier prompts (mirrors matchlock).
+  cmd = "podman run -d --name " + _sh_squote(cname) + " " +
+        "--hostname " + _sh_squote(name) + " " +
+        "-v " + _sh_squote(cwd + ":" + ws) + " " +
+        "-w " + _sh_squote(ws) + " " +
+        user_arg + " " +
+        gui_args + " " +
+        _sh_squote(img) + " " +
+        "sleep infinity 2>&1"
+
+  out = try `bash -c "#{cmd}"` or ""
+  trimmed = str.trim(out)
+  if trimmed == ""
+    _err("podman run produced no output")
+    os.exit(1)
+  end
+  # Verify the container actually exists. `podman run -d` prints the full
+  # container id on success; on failure it prints a diagnostic to stderr
+  # (merged here via 2>&1) and exits non-zero.
+  check = try `bash -c "podman inspect --format '{{.State.Status}}' #{cname} 2>/dev/null"` or ""
+  if str.trim(check) == ""
+    _err("podman run failed:")
+    puts out
+    os.exit(1)
+  end
+  return cname
+end
+
+# Build the bind-mounts and env vars needed for Wayland passthrough. We
+# intentionally do not support X11 — Wayland-only is documented as a feature.
+def _build_gui_args
+  wd = os.getenv("WAYLAND_DISPLAY")
+  xdg = os.getenv("XDG_RUNTIME_DIR")
+  if wd == "" || xdg == ""
+    _err("--gui requires a Wayland session: WAYLAND_DISPLAY and XDG_RUNTIME_DIR must be set")
+    _err("(X11 is intentionally not supported by the podman backend)")
+    os.exit(2)
+  end
+  sock = filepath.join(xdg, wd)
+  if !os.file_exists(sock)
+    _err("Wayland socket not found at #{sock}")
+    os.exit(2)
+  end
+  # Mount the host socket at the same path inside the container so apps that
+  # construct it from $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY find it.
+  args = "-v " + _sh_squote(sock + ":" + sock) + " " +
+         "-e " + _sh_squote("WAYLAND_DISPLAY=" + wd) + " " +
+         "-e " + _sh_squote("XDG_RUNTIME_DIR=" + xdg) + " "
+  # GPU access for hardware-accelerated apps. /dev/dri may not exist on a
+  # headless host, in which case we skip it (apps fall back to software
+  # rendering, or fail more loudly themselves).
+  if os.file_exists("/dev/dri")
+    args = args + "--device /dev/dri "
+  end
+  # D-Bus for app-bus and notifications, if the user session exposes one.
+  dbus = filepath.join(xdg, "bus")
+  if os.file_exists(dbus)
+    args = args + "-v " + _sh_squote(dbus + ":" + dbus) + " " +
+           "-e " + _sh_squote("DBUS_SESSION_BUS_ADDRESS=unix:path=" + dbus) + " "
+  end
+  return args
+end
+
+# ---------------- stop / resume / remove ----------------
+def _stop_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "podman stop #{id} >/dev/null 2>&1"` or nil
+end
+
+def _resume_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "podman start #{id} >/dev/null 2>&1"` or nil
+end
+
+def _remove_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "podman rm -f #{id} >/dev/null 2>&1"` or nil
+end
+
+# ---------------- wait_ready ----------------
+# Podman exec is usable as soon as the container reports running. We poll for
+# up to a few seconds to be safe — `podman run -d` returns once the container
+# is created but the process inside might not have started yet on a busy host.
+EXEC_READY_TIMEOUT_S = 30
+def _wait_ready_impl(id)
+  start = time.now()
+  while time.now() - start < EXEC_READY_TIMEOUT_S
+    out = try `bash -c "podman inspect --format '{{.State.Status}}' #{id} 2>/dev/null"` or ""
+    if str.trim(out) == "running"
+      return
+    end
+    sleep 0.1
+  end
+  _err("container #{id} did not reach 'running' within #{EXEC_READY_TIMEOUT_S}s")
+  os.exit(1)
+end
+
+# ---------------- logs ----------------
+def _logs_impl(id, extra)
+  extra_str = str.join(extra, " ")
+  bash -c "podman logs #{extra_str} #{id}"
+end
+
+# ---------------- exec channels ----------------
+# Provisioning runs as root regardless of the container's default user, so we
+# explicitly --user 0. Mirrors matchlock's `-u root`.
+def _exec_provision_impl(id, src, workspace)
+  tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
+  os.write_file(tmp, src)
+  bash -c "cat #{tmp} | podman exec -i --user 0 -w #{workspace} #{id} bash"
+  os.remove(tmp)
+end
+
+def _exec_shell_impl(id, workspace, tty)
+  bash -c "podman exec #{tty} -w #{workspace} #{id} bash -l"
+end
+
+def _exec_argv_impl(id, workspace, tty, argv)
+  # Same idiom as the matchlock backend — see backends/matchlock.rugo for
+  # the full justification of this temp-script dance.
+  tmp_script = filepath.join(os.tmp_dir(), "yolo-exec-#{os.pid()}.sh")
+  script_body = <<~SH
+    #!/usr/bin/env bash
+    trap 'rm -f "#{tmp_script}"' EXIT
+    exec podman exec #{tty} -w #{workspace} #{id} bash -lc 'exec "$@"' bash #{argv}
+  SH
+  os.write_file(tmp_script, script_body)
+  bash -c "bash #{tmp_script}"
+end
+
+# ---------------- disk accounting ----------------
+# `podman ps -a --size` reports both the writable layer (used) and total
+# image+writable (allocated). Format:
+#   <name>  <size> (virtual <vsize>)
+# We parse the size column for the named container.
+def _disk_real_impl(id)
+  raw = try `bash -c "podman ps -a --filter name=^#{id}$ --format '{{.Size}}' 2>/dev/null"` or ""
+  trimmed = str.trim(raw)
+  if trimmed == ""
+    return -1
+  end
+  # Format: "12.3MB (virtual 234MB)" — first token is the "used" size.
+  fields = str.fields(trimmed)
+  if len(fields) < 1
+    return -1
+  end
+  return _parse_size(fields[0])
+end
+
+def _disk_apparent_impl(id)
+  raw = try `bash -c "podman ps -a --filter name=^#{id}$ --format '{{.Size}}' 2>/dev/null"` or ""
+  trimmed = str.trim(raw)
+  if trimmed == ""
+    return -1
+  end
+  # Look for the "(virtual <N>)" segment.
+  idx = str.index(trimmed, "virtual ")
+  if idx < 0
+    return -1
+  end
+  rest = str.slice(trimmed, idx + 8, len(trimmed))
+  # rest looks like "234MB)" — strip the closing paren.
+  rest = str.trim_suffix(rest, ")")
+  return _parse_size(str.trim(rest))
+end
+
+# Parse "12.3MB", "234kB", "1.2GB" etc. into a byte count. Podman uses SI
+# units (MB = 1_000_000). Returns -1 on unparseable input.
+def _parse_size(s)
+  if s == ""
+    return -1
+  end
+  lower = str.lower(s)
+  # Find where the digits/dot end and the unit begins.
+  num_end = 0
+  i = 0
+  while i < len(lower)
+    c = str.slice(lower, i, i + 1)
+    if (c >= "0" && c <= "9") || c == "."
+      num_end = i + 1
+    else
+      break
+    end
+    i = i + 1
+  end
+  if num_end == 0
+    return -1
+  end
+  num_str = str.slice(lower, 0, num_end)
+  unit = str.slice(lower, num_end, len(lower))
+  unit = str.trim(unit)
+  # Use float math so 12.3MB parses correctly.
+  val = try conv.to_f(num_str) or -1.0
+  if val < 0
+    return -1
+  end
+  mult = 1.0
+  if unit == "b" || unit == ""
+    mult = 1.0
+  elsif unit == "kb"
+    mult = 1000.0
+  elsif unit == "mb"
+    mult = 1000000.0
+  elsif unit == "gb"
+    mult = 1000000000.0
+  elsif unit == "tb"
+    mult = 1000000000000.0
+  else
+    return -1
+  end
+  return conv.to_i(val * mult)
+end
+
+# ---------------- image registry ----------------
+def _image_remove_impl(tag)
+  if tag == "" || tag == nil
+    return
+  end
+  try `bash -c "podman image rm #{tag} >/dev/null 2>&1"` or nil
+end
+
+# ---------------- Factory ----------------
+def make
+  be = {}
+  be["NAME"]             = "podman"
+  be["SUPPORTS_GUI"]     = true
+  be["SUPPORTS_EXPORT"]  = false
+  be["PERSISTS_ON_STOP"] = true
+  be["DEFAULT_IMAGE"]    = "registry.fedoraproject.org/fedora-toolbox:44"
+
+  be["list_table"] = fn()
+    return _list_table_impl()
+  end
+  be["start"] = fn(opts)
+    return _start_impl(opts)
+  end
+  be["stop"] = fn(id)
+    _stop_impl(id)
+  end
+  be["resume"] = fn(id)
+    _resume_impl(id)
+  end
+  be["remove"] = fn(id)
+    _remove_impl(id)
+  end
+  be["wait_ready"] = fn(id)
+    _wait_ready_impl(id)
+  end
+  be["logs"] = fn(id, extra)
+    _logs_impl(id, extra)
+  end
+  be["exec_provision"] = fn(id, src, workspace)
+    _exec_provision_impl(id, src, workspace)
+  end
+  be["exec_shell"] = fn(id, workspace, tty)
+    _exec_shell_impl(id, workspace, tty)
+  end
+  be["exec_argv"] = fn(id, workspace, tty, argv)
+    _exec_argv_impl(id, workspace, tty, argv)
+  end
+  be["disk_apparent"] = fn(id)
+    return _disk_apparent_impl(id)
+  end
+  be["disk_real"] = fn(id)
+    return _disk_real_impl(id)
+  end
+  be["image_remove"] = fn(tag)
+    _image_remove_impl(tag)
+  end
+  # Export/import: SUPPORTS_EXPORT=false; yolo.rugo refuses these subcommands
+  # at the CLI layer before dispatching, so these implementations are
+  # intentionally absent.
+
+  return be
+end

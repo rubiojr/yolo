@@ -18,6 +18,9 @@ A chapter-by-chapter tour of `yolo`, in reading order.
    state, restore it on another host.
 8. [Troubleshooting](./08-troubleshooting.md) — KVM permissions, missing
    `matchlock`, broken auto-heal, dangling state, MITM cert errors.
+9. [Backends](./09-backends.md) — pick between matchlock (microVM) and
+   podman (containers, GUI apps), capability matrix, how the abstraction
+   is wired together.
 
 For internals (auto-heal algorithm, state file layout, provisioner
 markers, project source layout) see [architecture.md](./architecture.md).

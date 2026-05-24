@@ -112,15 +112,36 @@ a single `key: value` pair.
 
 | Key                                      | Type    | Default      | Example values                          |
 | ---------------------------------------- | ------- | ------------ | --------------------------------------- |
-| `image`                                  | string  | `fedora:44`  | `fedora:44`, `registry.io:5000/foo:bar` |
+| `image`                                  | string  | *(backend default)* | `fedora:44`, `registry.io:5000/foo:bar` |
 | `cpus`                                   | integer | `2`          | `4`, `8`                                |
 | `memory`                                 | size    | `2048` (MiB) | `4G`, `2048M`, `2048`                   |
 | `disk-size` *(aliases: `disk`, `disk_mb`)* | size    | `32768` (MiB)| `64G`, `100g`, `32768`                  |
+| `backend`                                | string  | `matchlock`  | `matchlock`, `podman`                   |
+| `gui`                                    | bool    | `false`      | `true`, `false`                         |
 | `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
 
 Unknown keys produce a warning (`Yolofile: ignoring unknown front matter
 key '...'`) but do not stop the run, so you can add a comment-like key
 during development without breaking the build.
+
+#### `backend`
+
+Which runtime executes the VM: `matchlock` (Firecracker microVMs) or
+`podman` (containers, with optional GUI support). Once a VM is created
+the backend choice is recorded in `<name>.backend` and becomes sticky —
+subsequent `yolo` invocations under that name use the recorded backend
+regardless of any front matter override. To switch a project to a
+different backend, `yolo rm` it first, then re-attach with the new
+`backend:`.
+
+See [Backends](./09-backends.md) for the capability matrix.
+
+#### `gui`
+
+Boolean. When `true` and `backend` is `podman`, the container is created
+with the host's Wayland socket bind-mounted so graphical apps render on
+the host compositor. Has no effect when `backend` is `matchlock`
+(matchlock would refuse the invocation; see `--gui` in `yolo --help`).
 
 #### `image`
 

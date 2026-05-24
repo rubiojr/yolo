@@ -119,21 +119,45 @@ def _start_impl(opts)
         user_arg + " " +
         gui_args + " " +
         _sh_squote(img) + " " +
-        "sleep infinity 2>&1"
+        "sleep infinity"
 
-  out = try `bash -c "#{cmd}"` or ""
+  # Run podman via a wrapper that captures both stdout and stderr to a
+  # tempfile regardless of exit code. rugo's bare-backtick form drops
+  # the output on non-zero exit ("or" branch fires with no body); rugo's
+  # os.exec on failure raises with a generic "exit status N" message
+  # and no captured output. Neither is helpful when podman fails with
+  # something diagnostic ("Error: short-name resolution disabled but…",
+  # "permission denied", etc.). The tempfile redirect lets us surface
+  # podman's actual message to the user.
+  out_file = "/tmp/yolo-podman-out-#{os.pid()}"
+  wrap = "(" + cmd + ") > " + out_file + " 2>&1"
+  exec_rc = try os.exec("bash -c " + _sh_squote(wrap)) or "FAILED"
+  out = ""
+  if os.file_exists(out_file)
+    out = os.read_file(out_file)
+    os.remove(out_file)
+  end
   trimmed = str.trim(out)
+  if exec_rc == "FAILED"
+    _err("podman run failed:")
+    if trimmed != ""
+      puts trimmed
+    else
+      _err("(no output captured)")
+    end
+    os.exit(1)
+  end
   if trimmed == ""
-    _err("podman run produced no output")
+    _err("podman run produced no output (expected a container id)")
     os.exit(1)
   end
   # Verify the container actually exists. `podman run -d` prints the full
   # container id on success; on failure it prints a diagnostic to stderr
-  # (merged here via 2>&1) and exits non-zero.
+  # (captured above) and exits non-zero.
   check = try `bash -c "podman inspect --format '{{.State.Status}}' #{cname} 2>/dev/null"` or ""
   if str.trim(check) == ""
-    _err("podman run failed:")
-    puts out
+    _err("podman container did not appear in `podman inspect` after run:")
+    puts trimmed
     os.exit(1)
   end
   return cname

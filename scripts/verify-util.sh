@@ -6,9 +6,9 @@
 # Contract: the sourcing script populates a small set of globals (DISTRO,
 # GUEST_USER, image-discovery configuration, port defaults), and then
 # calls `verify_main`. The orchestration order — pre-flight, boot, SSH
-# wait, install.sh, optional yolo overwrite, matchlock setup/diagnose,
-# nested-yolo smoke tests — lives here so both verifiers stay in lock
-# step.
+# wait, install.sh (which now also runs matchlock setup + /dev/net/tun
+# fix), local yolo overwrite, matchlock diagnose, nested-yolo smoke
+# tests — lives here so both verifiers stay in lock step.
 #
 # Required globals (set by the sourcing wrapper):
 #   ROOT             absolute path to the repo root
@@ -21,18 +21,19 @@
 #   KEEP             0/1 — leave the VM running after the run
 #   NESTED_YOLO      0/1 — run the matchlock nested-yolo smoke test
 #   PODMAN_YOLO      0/1 — run the podman nested-yolo smoke test
-#   LOCAL_YOLO       path | "auto" | "" — replace the installed yolo
 #   IMAGE            (out) host-side path to the cached qcow2 / img
 #
 # Optional globals:
 #   DISK_SIZE        e.g. "16G" — overlay resize (Ubuntu's tiny rootfs
 #                    needs this; Fedora's doesn't)
 #   IMAGE_NAME       wrapper-set hint for the cache filename
-#   FETCH_IMAGE      function name the wrapper provides for downloading
-#                    the cloud image; sourced lazily so each wrapper
-#                    only carries its distro-specific URL/scrape logic
 #   CLOUD_INIT_EXTRA additional cloud-config snippet (multi-line string)
 #                    merged into the user-data we write
+#
+# The verify scripts always rebuild yolo from $ROOT/yolo.rugo and use
+# that locally-built binary inside the guest (install.sh still runs
+# first, so the install path itself is verified). `rugo` is therefore
+# a hard host-side dependency.
 #
 # Outputs:
 #   WORK             temp dir (cleaned on exit unless --keep)
@@ -277,20 +278,24 @@ run_install_sh() {
     run_ssh 'bash /tmp/install.sh'
 }
 
-# ---------------- Local yolo override ----------------
-override_local_yolo_if_set() {
-    [ -n "${LOCAL_YOLO:-}" ] || return 0
-    if [ "$LOCAL_YOLO" = "auto" ]; then
-        log "Building yolo locally from $ROOT/yolo.rugo via rugo"
-        command -v rugo >/dev/null \
-            || die "rugo not found on PATH; install it (https://github.com/rubiojr/rugo) or pass --local-yolo PATH"
-        ( cd "$ROOT" && rugo build yolo.rugo ) \
-            || die "rugo build yolo.rugo failed"
-        LOCAL_YOLO="$ROOT/yolo"
-    fi
-    [ -x "$LOCAL_YOLO" ] || die "local yolo binary not found or not executable: $LOCAL_YOLO"
-    log "Overwriting installed yolo with local build: $LOCAL_YOLO"
-    copy_to_guest "$LOCAL_YOLO" /tmp/yolo-local
+# ---------------- Local yolo build ----------------
+# Always rebuilds yolo from $ROOT/yolo.rugo via rugo and installs it
+# over whatever install.sh put in place. The verify scripts are
+# development tooling — they exist to validate code changes — so it
+# makes no sense to test anything other than the working tree's yolo.
+# install.sh's behaviour is still verified end-to-end up to this point
+# (it ran successfully and produced a working released-yolo binary
+# that we then overwrite).
+build_and_install_local_yolo() {
+    log "Building yolo locally from $ROOT/yolo.rugo via rugo"
+    command -v rugo >/dev/null \
+        || die "rugo not found on PATH; install it (https://github.com/rubiojr/rugo)"
+    ( cd "$ROOT" && rugo build yolo.rugo ) \
+        || die "rugo build yolo.rugo failed"
+    local local_yolo="$ROOT/yolo"
+    [ -x "$local_yolo" ] || die "yolo binary not produced at $local_yolo"
+    log "Overwriting installed yolo with local build: $local_yolo"
+    copy_to_guest "$local_yolo" /tmp/yolo-local
     run_ssh 'install -m 0755 /tmp/yolo-local "$HOME/.local/bin/yolo" && rm -f /tmp/yolo-local'
 }
 
@@ -306,10 +311,12 @@ verify_binaries() {
     '
 }
 
-run_matchlock_setup() {
-    log "Running 'sudo matchlock setup linux' and enrolling the $GUEST_USER user"
-    run_ssh "sudo matchlock setup linux && sudo matchlock setup user $GUEST_USER"
-    log "Running 'matchlock diagnose' (fresh SSH session picks up new group membership)"
+run_matchlock_diagnose() {
+    # install.sh now runs `matchlock setup linux` and `matchlock setup user`
+    # itself, so we just verify the host ended up in a healthy state. A
+    # fresh SSH session is needed for the new kvm/netdev group memberships
+    # to be visible to the running shell; ours is fresh per run_ssh call.
+    log "Running 'matchlock diagnose' (fresh SSH session picks up new group memberships)"
     run_ssh 'matchlock diagnose'
 }
 
@@ -385,8 +392,17 @@ nested_yolo_matchlock_smoke() {
         # `script(1)` would also have worked, but it has bounced between
         # util-linux sub-packages across Fedora releases and isn'\''t always
         # in the cloud-image base. python3 always is.
+        #
+        # We deliberately do NOT propagate pty.spawn'\''s return value as
+        # python'\''s exit code. pty.spawn returns the raw os.waitpid status
+        # of the child, which on Ubuntu sometimes ends up non-zero just
+        # because the in-guest bash is killed by the PTY closing before
+        # it can print its "logout" message. The actual test outcome lives
+        # in the captured output; the grep assertions below are the real
+        # pass/fail gate. We still let real python errors (yolo not on
+        # PATH, etc.) propagate so the pipeline can fail on those.
         printf "%s\n" "uname -s" "echo INTERACTIVE_OK_$$" "exit" \
-            | timeout 180 python3 -c "import pty,sys; sys.exit(pty.spawn([\"$YOLO\", \"--no-provision\"]))"
+            | timeout 180 python3 -c "import pty; pty.spawn([\"$YOLO\", \"--no-provision\"])"
         echo "=== interactive done ==="
     ' 2>&1 | tee "$nested_out_file"; then
         die "nested yolo (matchlock) smoke test failed"
@@ -403,9 +419,10 @@ nested_yolo_matchlock_smoke() {
         || die "interactive yolo attach: piped commands did not produce output"
     echo "$nested_out" | grep -q 'uname -s' \
         || die "interactive yolo attach: typed command not echoed — in-guest bash has no PTY (tty_check / -t negotiation broken)"
-    # Confirm the dispatch went through the matchlock backend. Belt-and-
-    # braces: the matchlock backend's start_vm log includes "[matchlock]"
-    # at the end of the line.
+    # Confirm the dispatch went through the matchlock backend. The
+    # matchlock backend's start_vm logs "[matchlock]" at the end of the
+    # line; this catches regressions where backend selection silently
+    # picks the wrong backend.
     echo "$nested_out" | grep -q '\[matchlock\]' \
         || die "yolo did not log the matchlock backend tag — backend dispatch may be wrong"
     log "  nested yolo microVM (matchlock) ran successfully (passthrough + interactive)"
@@ -421,8 +438,9 @@ nested_yolo_podman_smoke() {
     log "Booting a nested yolo container (podman backend)"
     log "  (first run pulls the fedora-toolbox image; this can take a few minutes)"
 
-    # podman isn't part of matchlock's install.sh — install it now.
-    ensure_guest_pkgs "$(_pkg_for podman)"
+    # podman + passt + slirp4netns are installed by web/install.sh, so we
+    # don't apt/dnf-install them here. If they're somehow missing, the
+    # podman invocation below will fail with a clear error.
 
     local nested_out_file="$WORK/nested-podman.out"
     # shellcheck disable=SC2016
@@ -497,9 +515,9 @@ verify_main() {
     wait_cloud_init_if_present
 
     run_install_sh
-    override_local_yolo_if_set
+    build_and_install_local_yolo
     verify_binaries
-    run_matchlock_setup
+    run_matchlock_diagnose
 
     if [ "${NESTED_YOLO:-1}" -eq 1 ]; then
         nested_yolo_matchlock_smoke

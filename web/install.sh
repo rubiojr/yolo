@@ -16,9 +16,17 @@
 #   1. Pre-flight: detects Fedora (dnf) or Ubuntu (apt) and refuses anything else.
 #   2. Installs host dependencies (curl, tar, ca-certificates).
 #   3. Installs matchlock from GitHub Releases (.rpm on Fedora, .deb on Ubuntu).
-#   4. Downloads the matching yolo binary from GitHub Releases into
+#   4. Installs podman (+ passt/slirp4netns on Ubuntu) so 'yolo --backend
+#      podman' works. Pass --skip-podman if you only use the matchlock
+#      backend.
+#   5. Runs 'matchlock setup linux' and enrolls the invoking user in kvm + netdev.
+#   6. Restores /dev/net/tun to mode 0666 (kernel-recommended default) so
+#      rootless container tooling (notably podman pasta on Ubuntu) works.
+#      Installs a udev rule so the permission survives reboots.
+#   7. Downloads the matching yolo binary from GitHub Releases into
 #      ~/.local/bin (or $YOLO_PREFIX) and verifies its sha256 checksum.
-#   5. Prints next-step hints (matchlock diagnose / setup linux).
+#   8. Prints next-step hints (matchlock diagnose / log-out-and-back-in for
+#      group membership).
 
 set -euo pipefail
 
@@ -33,6 +41,8 @@ YOLO_PREFIX="${YOLO_PREFIX:-$HOME/.local/bin}"
 
 SKIP_MATCHLOCK=0
 SKIP_DEPS=0
+SKIP_SETUP=0
+SKIP_PODMAN=0
 ALLOW_MISSING_CHECKSUM=0
 
 # ---------------- Logging ----------------
@@ -59,6 +69,13 @@ Options:
   --skip-matchlock              Skip installing matchlock (assume already present).
   --skip-deps                   Skip the host package-manager install of
                                 build/runtime deps (curl, tar, ca-certificates).
+  --skip-setup                  Skip running 'matchlock setup linux',
+                                'matchlock setup user', and the /dev/net/tun
+                                permission fix. Use when host setup is already
+                                done or you intend to do it manually.
+  --skip-podman                 Skip installing podman. yolo's podman backend
+                                won't work without it; pass this if you only
+                                use the default (matchlock) backend.
   --allow-missing-checksum      Don't fail if the release lacks a .sha256 sidecar
                                 (useful for forks / dev releases — discouraged).
   -h, --help                    Show this help.
@@ -82,6 +99,8 @@ while [ "$#" -gt 0 ]; do
       YOLO_PREFIX="$2"; shift 2 ;;
     --skip-matchlock) SKIP_MATCHLOCK=1; shift ;;
     --skip-deps)      SKIP_DEPS=1; shift ;;
+    --skip-setup)     SKIP_SETUP=1; shift ;;
+    --skip-podman)    SKIP_PODMAN=1; shift ;;
     --allow-missing-checksum) ALLOW_MISSING_CHECKSUM=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1 (try --help)" ;;
@@ -237,6 +256,110 @@ else
   warn "Skipping matchlock install (--skip-matchlock)"
 fi
 
+# ---------------- Install podman ----------------
+# Podman is the runtime for yolo's podman backend (GUI apps via Wayland,
+# stop/start state persistence). Installing it by default keeps `yolo
+# --backend podman` working out of the box; pass --skip-podman if you
+# only use the matchlock backend.
+#
+# On Fedora the podman package pulls in pasta (passt), netavark, and
+# slirp4netns as deps. On Ubuntu we explicitly include passt and
+# slirp4netns so pasta is available even on older podman that didn't
+# declare it as a hard dep.
+if [ "$SKIP_PODMAN" -eq 0 ]; then
+  case "$DISTRO" in
+    fedora)
+      log "Installing podman (Fedora)"
+      $SUDO dnf install -y --setopt=install_weak_deps=False podman
+      ;;
+    ubuntu)
+      log "Installing podman + passt + slirp4netns (Ubuntu)"
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends podman passt slirp4netns
+      ;;
+  esac
+else
+  warn "Skipping podman install (--skip-podman). 'yolo --backend podman' will not work without it."
+fi
+
+# ---------------- Host setup (matchlock + /dev/net/tun) ----------------
+# install.sh used to leave 'matchlock setup linux' as a manual follow-up
+# step; the install would succeed but users had to read the summary and
+# run sudo by hand before yolo would work. We escalate via $SUDO during
+# package install anyway, so it's no extra security surface to do the
+# setup steps in the same run.
+#
+# Also: the matchlock setup tightens /dev/net/tun to mode 0660 root:netdev
+# (its binary has cap_net_admin via setcap, so the lockdown doesn't
+# affect matchlock itself). This breaks rootless container tools that
+# open /dev/net/tun from inside a user namespace where supplementary
+# groups aren't mapped — most visibly, podman 5.x's default network
+# helper (pasta) on Ubuntu, which is shipped without file caps and
+# therefore relies on the device being world-accessible (kernel
+# docs recommend 0666 — see Documentation/networking/tuntap.rst).
+#
+# We restore the kernel-recommended permission (0666) and install a
+# udev rule so it survives reboots. CAP_NET_ADMIN inside the namespace
+# is still required for TUNSETIFF, so this doesn't grant additional
+# capability — DAC just stops gating the open() incidentally.
+if [ "$SKIP_SETUP" -eq 0 ]; then
+  # Resolve which user to enroll. When called via sudo, $SUDO_USER is
+  # the original caller; running as root directly leaves it unset and
+  # we skip enrollment with a warning.
+  if [ "$(id -u)" -eq 0 ]; then
+    TARGET_USER="${SUDO_USER:-}"
+  else
+    TARGET_USER="$(id -un)"
+  fi
+
+  log "Running 'matchlock setup linux' (one-time host setup)"
+  $SUDO matchlock setup linux
+
+  if [ -n "$TARGET_USER" ] && [ "$TARGET_USER" != "root" ]; then
+    log "Enrolling user '$TARGET_USER' (adds to kvm + netdev groups)"
+    $SUDO matchlock setup user "$TARGET_USER"
+  else
+    warn "Skipping user enrollment — running as root with no SUDO_USER set."
+    warn "Run 'sudo matchlock setup user <name>' for each user that should use yolo."
+  fi
+
+  # Restore kernel-recommended permission on /dev/net/tun for rootless
+  # container tooling. Apply immediately (chmod) and persist across
+  # reboots (udev rule).
+  if [ -e /dev/net/tun ]; then
+    log "Restoring /dev/net/tun permissions to 0666 (kernel-recommended default)"
+    $SUDO chmod 0666 /dev/net/tun
+  else
+    warn "/dev/net/tun is not present yet; the tun kernel module may not be loaded. The udev rule below will apply when it is."
+  fi
+
+  udev_rule='# Installed by yolo'\''s install.sh.
+#
+# Restore the kernel-recommended permission (0666) on /dev/net/tun.
+# Matchlock'\''s setup tightens this to 0660 root:netdev for itself —
+# the matchlock binary has cap_net_admin via setcap, so the lockdown
+# doesn'\''t affect it. But other rootless container tooling (notably
+# podman 5.x'\''s default pasta network helper on Ubuntu, which doesn'\''t
+# ship file caps) can'\''t open the device from inside a user namespace
+# where supplementary groups aren'\''t mapped. CAP_NET_ADMIN is still
+# required for TUNSETIFF, so 0666 doesn'\''t grant new privilege; DAC
+# just stops gating the open() incidentally.
+#
+# See Documentation/networking/tuntap.rst for the upstream guidance.
+KERNEL=="tun", MODE="0666"
+'
+  rule_path="/etc/udev/rules.d/99-yolo-tun.rules"
+  log "Installing udev rule at $rule_path (persists across reboots)"
+  printf '%s' "$udev_rule" | $SUDO tee "$rule_path" >/dev/null
+  # Best effort — udevadm may not be present on every minimal image.
+  if command -v udevadm >/dev/null 2>&1; then
+    $SUDO udevadm control --reload-rules 2>/dev/null || true
+    $SUDO udevadm trigger /dev/net/tun 2>/dev/null || true
+  fi
+else
+  warn "Skipping host setup (--skip-setup)"
+fi
+
 # ---------------- Resolve yolo download URL ----------------
 if [ -n "$YOLO_VERSION" ]; then
   case "$YOLO_VERSION" in
@@ -302,11 +425,20 @@ ${C_BLUE}==>${C_RESET} All done.
 
 Next steps:
   - matchlock diagnose
-  - If diagnose reports missing host setup:  sudo matchlock setup linux
+$( [ "$SKIP_SETUP" -eq 1 ] && cat <<NOTE
+  - Host setup was skipped (--skip-setup). Before using yolo run:
+      sudo matchlock setup linux
+      sudo matchlock setup user $(id -un)
+      sudo chmod 0666 /dev/net/tun
+NOTE
+)
+  - If your shell session pre-dates this install, log out and back in so
+    the new kvm/netdev group memberships take effect.
   - cd into a project and run:  yolo
 
 Versions:
   yolo:      ${YOLO_LABEL}  (${YOLO_PREFIX}/yolo)
   matchlock: $( [ "$SKIP_MATCHLOCK" -eq 1 ] && echo "(skipped)" || echo "${MATCHLOCK_VERSION:-latest}" )
+  podman:    $( [ "$SKIP_PODMAN" -eq 1 ] && echo "(skipped)" || command -v podman >/dev/null 2>&1 && podman --version 2>/dev/null | awk '{print $3}' || echo "(not installed)" )
 
 EOF

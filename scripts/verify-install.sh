@@ -14,13 +14,17 @@
 #   scripts/verify-install.sh --keep                # don't shut the VM down on exit
 #   scripts/verify-install.sh --no-nested-yolo      # skip matchlock smoke test
 #   scripts/verify-install.sh --no-podman-yolo      # skip podman smoke test
-#   scripts/verify-install.sh --local-yolo auto     # rebuild yolo.rugo and use it
 #
 # Host requirements:
 #   - /dev/kvm readable+writable
 #   - qemu-system-x86_64, cloud-localds (or genisoimage / xorriso),
-#     curl, ssh, ssh-keygen
+#     curl, ssh, ssh-keygen, rugo
 #   - kvm_intel.nested=1 (or kvm_amd.nested=1) — default on modern kernels.
+#
+# Note: the verify scripts always rebuild yolo from yolo.rugo and use
+# that binary inside the guest. install.sh's behaviour is still
+# verified end-to-end (it runs first), but the runtime smoke tests
+# exercise your working-tree yolo, not the published binary.
 
 set -euo pipefail
 
@@ -41,7 +45,6 @@ IMAGE=""
 KEEP=0
 NESTED_YOLO=1
 PODMAN_YOLO=1
-LOCAL_YOLO=""
 
 # Fedora's stock cloud image is roomy enough for the matchlock cache
 # (~150 MB) plus a nested microVM rootfs (~5 GB), so we don't resize.
@@ -70,13 +73,13 @@ Options:
   --no-nested-yolo          Skip the matchlock smoke test
   --podman-yolo             Run the podman smoke test (default: on)
   --no-podman-yolo          Skip the podman smoke test
-  --local-yolo PATH         After install.sh runs, overwrite the installed
-                            yolo binary in the guest with this local one
-                            (use 'auto' to build it from yolo.rugo via rugo).
   -h, --help                Show this help.
 
 Environment overrides: INSTALL_SH, FEDORA_VERSION, CACHE_DIR, SSH_PORT,
                        MEM_MB, SMP, SSH_TIMEOUT.
+
+Note: yolo is always rebuilt from yolo.rugo and the local binary is
+what gets tested inside the guest. \`rugo\` must be on PATH.
 EOF
 }
 
@@ -94,7 +97,6 @@ while [ $# -gt 0 ]; do
         --no-nested-yolo)  NESTED_YOLO=0; shift ;;
         --podman-yolo)     PODMAN_YOLO=1; shift ;;
         --no-podman-yolo)  PODMAN_YOLO=0; shift ;;
-        --local-yolo)      LOCAL_YOLO="$2"; shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *) die "unknown arg: $1 (try --help)" ;;
     esac

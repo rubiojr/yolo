@@ -13,13 +13,17 @@
 #   scripts/verify-install-ubuntu.sh --keep          # don't shut the VM down on exit
 #   scripts/verify-install-ubuntu.sh --no-nested-yolo  # skip matchlock smoke test
 #   scripts/verify-install-ubuntu.sh --no-podman-yolo  # skip podman smoke test
-#   scripts/verify-install-ubuntu.sh --local-yolo auto # rebuild yolo.rugo and use it
 #
 # Host requirements (same as the Fedora verifier):
 #   - /dev/kvm readable+writable
 #   - qemu-system-x86_64, cloud-localds (or genisoimage / xorriso), curl,
-#     ssh, ssh-keygen
+#     ssh, ssh-keygen, rugo
 #   - kvm_intel.nested=1 (or kvm_amd.nested=1) — default on modern kernels.
+#
+# Note: the verify scripts always rebuild yolo from yolo.rugo and use
+# that binary inside the guest. install.sh's behaviour is still
+# verified end-to-end (it runs first), but the runtime smoke tests
+# exercise your working-tree yolo, not the published binary.
 
 set -euo pipefail
 
@@ -42,13 +46,15 @@ IMAGE=""
 KEEP=0
 NESTED_YOLO=1
 PODMAN_YOLO=1
-LOCAL_YOLO=""
 
 # Ubuntu cloud images ship a tiny ~2.3 GB rootfs, far too small to host
-# a matchlock OCI cache + nested microVM rootfs. Grow the per-run
-# overlay; cloud-init's growpart + cloud-initramfs-growroot expand the
-# partition on first boot.
-DISK_SIZE="${DISK_SIZE:-16G}"
+# the union of: apt cache + matchlock + Firecracker + a nested microVM
+# rootfs (32 GB sparse by yolo's default) + podman storage + the
+# fedora-toolbox:44 image (~600 MB). 24 GB has held up to both the
+# matchlock and podman smoke tests on a single run with comfortable
+# headroom. cloud-init's growpart + cloud-initramfs-growroot expand
+# the partition on first boot.
+DISK_SIZE="${DISK_SIZE:-24G}"
 
 # DNS workaround for Ubuntu cloud images: when the *host* runs
 # systemd-resolved (Fedora workstation default), the host's
@@ -88,15 +94,15 @@ Options:
   --no-nested-yolo          Skip the matchlock smoke test
   --podman-yolo             Run the podman smoke test (default: on)
   --no-podman-yolo          Skip the podman smoke test
-  --local-yolo PATH         After install.sh runs, overwrite the installed
-                            yolo binary in the guest with this local one
-                            (use 'auto' to build it from yolo.rugo via rugo).
   -h, --help                Show this help.
 
 Environment overrides: INSTALL_SH, UBUNTU_VERSION, CACHE_DIR, SSH_PORT,
                        MEM_MB, SMP, SSH_TIMEOUT, DISK_SIZE.
 
-Note: the default SSH port (2223) differs from verify-install.sh (2222) so
+Note: yolo is always rebuilt from yolo.rugo and the local binary is
+what gets tested inside the guest. \`rugo\` must be on PATH.
+
+The default SSH port (2223) differs from verify-install.sh (2222) so
 the two verifiers can run side by side without colliding.
 EOF
 }
@@ -115,7 +121,6 @@ while [ $# -gt 0 ]; do
         --no-nested-yolo)  NESTED_YOLO=0; shift ;;
         --podman-yolo)     PODMAN_YOLO=1; shift ;;
         --no-podman-yolo)  PODMAN_YOLO=0; shift ;;
-        --local-yolo)      LOCAL_YOLO="$2"; shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *) die "unknown arg: $1 (try --help)" ;;
     esac

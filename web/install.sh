@@ -262,10 +262,15 @@ fi
 # --backend podman` working out of the box; pass --skip-podman if you
 # only use the matchlock backend.
 #
-# On Fedora the podman package pulls in pasta (passt), netavark, and
-# slirp4netns as deps. On Ubuntu we explicitly include passt and
-# slirp4netns so pasta is available even on older podman that didn't
-# declare it as a hard dep.
+# On Fedora the podman package pulls in pasta (passt), netavark,
+# slirp4netns, and newuidmap (shadow-utils, base image) as deps. On
+# Ubuntu we explicitly pull in:
+#   - passt: provides pasta, podman 5.x's default rootless network
+#     helper. Not always a hard dep on older podman.
+#   - slirp4netns: fallback rootless network helper.
+#   - uidmap: provides newuidmap/newgidmap. Rootless podman refuses to
+#     run with "command required for rootless mode with multiple IDs:
+#     newuidmap" otherwise. Ubuntu's podman package doesn't pull this in.
 if [ "$SKIP_PODMAN" -eq 0 ]; then
   case "$DISTRO" in
     fedora)
@@ -273,9 +278,9 @@ if [ "$SKIP_PODMAN" -eq 0 ]; then
       $SUDO dnf install -y --setopt=install_weak_deps=False podman
       ;;
     ubuntu)
-      log "Installing podman + passt + slirp4netns (Ubuntu)"
+      log "Installing podman + passt + slirp4netns + uidmap (Ubuntu)"
       $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        --no-install-recommends podman passt slirp4netns
+        --no-install-recommends podman passt slirp4netns uidmap
       ;;
   esac
 else

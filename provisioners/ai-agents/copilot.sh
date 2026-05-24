@@ -9,14 +9,34 @@
 
 set -euo pipefail
 
-# ---------------- Non-interactive dnf ----------------
-if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
-    echo 'assumeyes=True'          >> /etc/dnf/dnf.conf
-    echo 'install_weak_deps=False' >> /etc/dnf/dnf.conf
+# ---------------- Detect distro / package manager ----------------
+PKG=""
+if command -v dnf >/dev/null 2>&1; then
+    PKG=dnf
+elif command -v apt-get >/dev/null 2>&1; then
+    PKG=apt
+else
+    echo "==> [yolo:ai-agent/copilot] no supported package manager (dnf/apt) found" >&2
+    exit 1
 fi
 
 # ---------------- Prereqs for the installer ----------------
-dnf -q install curl-minimal ca-certificates tar gzip xz
+case "$PKG" in
+    dnf)
+        # Non-interactive dnf
+        if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
+            echo 'assumeyes=True'          >> /etc/dnf/dnf.conf
+            echo 'install_weak_deps=False' >> /etc/dnf/dnf.conf
+        fi
+        dnf -q install curl-minimal ca-certificates tar gzip xz
+        ;;
+    apt)
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends \
+            curl ca-certificates tar gzip xz-utils
+        ;;
+esac
 
 # ---------------- Copilot CLI ----------------
 # The official installer drops a self-contained binary into $PREFIX/bin/

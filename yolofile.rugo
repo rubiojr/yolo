@@ -1,0 +1,318 @@
+# yolofile.rugo — Yolofile parsing and front matter validation.
+#
+# A Yolofile is a plain bash script (run as root inside the guest) that
+# yolo may use as the per-CWD provisioner. It can optionally start with a
+# YAML-ish front matter block declaring VM-creation overrides (image,
+# cpus, memory, disk-size, backend, gui, ai-agent). See docs/05-yolofile.md.
+#
+# This module owns:
+#   - locating the Yolofile (path / exists)
+#   - parsing front matter + extracting the bash body (parse_content)
+#   - validating front matter into typed overrides (validate)
+#
+# What it does NOT own:
+#   - applying the overrides to module-level globals — Rugo can't mutate a
+#     different module's top-level vars, so the caller does that.
+#   - hashing the bash body for the .applied marker — that lives in
+#     yolo.rugo's resolve_provisioner.
+
+use "os"
+use "str"
+use "color"
+use "conv"
+use "filepath"
+
+# Constant filename. Kept here (rather than in yolo.rugo) because nothing
+# outside this module needs to know it by name.
+FILENAME = "Yolofile"
+
+# ---------------- Logging ----------------
+# Same `[yolo]` tag as the rest so error messages look uniform. Duplicated
+# rather than imported to keep the module self-contained, mirroring the
+# pattern used in backends/matchlock.rugo and backends/podman.rugo.
+def _log(msg)
+  prefix = color.dim("[yolo]")
+  puts "#{prefix} #{msg}"
+end
+def _warn(msg)
+  prefix = color.dim("[yolo]")
+  puts "#{prefix} #{color.yellow(msg)}"
+end
+def _err(msg)
+  prefix = color.dim("[yolo]")
+  puts "#{prefix} #{color.red(msg)}"
+end
+
+# ---------------- Disk size parsing ----------------
+# Duplicated from cli.rugo (small, pure, stable). Used by validate() for
+# memory: / disk-size: front matter values. We could `require "cli"` to
+# share, but that introduces a sibling-module dependency for a 30-line
+# helper — not worth it.
+def _parse_size(s)
+  if s == ""
+    return ""
+  end
+  lower = str.lower(s)
+  if str.ends_with(lower, "b")
+    lower = str.slice(lower, 0, len(lower) - 1)
+  end
+  multiplier = 1
+  unit_len = 0
+  if str.ends_with(lower, "g")
+    multiplier = 1024
+    unit_len = 1
+  elsif str.ends_with(lower, "m")
+    multiplier = 1
+    unit_len = 1
+  end
+  num_str = lower
+  if unit_len > 0
+    num_str = str.slice(lower, 0, len(lower) - unit_len)
+  end
+  if num_str == ""
+    return ""
+  end
+  n = try conv.to_i(num_str) or -1
+  if n <= 0
+    return ""
+  end
+  return conv.to_s(n * multiplier)
+end
+
+# ---------------- File location ----------------
+def path
+  return filepath.join(os.cwd(), FILENAME)
+end
+
+def exists
+  return os.file_exists(path())
+end
+
+# ---------------- Front matter parsing ----------------
+# Strip optional surrounding double or single quotes from a value. Used when
+# parsing values like `image: "fedora:44"`.
+def _unquote(s)
+  if len(s) >= 2
+    first = str.slice(s, 0, 1)
+    last = str.slice(s, len(s) - 1, len(s))
+    if (first == "\"" && last == "\"") || (first == "'" && last == "'")
+      return str.slice(s, 1, len(s) - 1)
+    end
+  end
+  return s
+end
+
+# Conservative allowlist for OCI image references used in front matter.
+# Front matter is repo-controlled and flows into the host-side `matchlock
+# run` shell command, so any value that ends up there must be tightly
+# bounded: we reject quotes, whitespace, $, backticks, semicolons, and
+# anything else that could escape the surrounding double quotes in the
+# rendered script. This is stricter than what OCI technically allows but
+# covers the universe of reasonable image references (registries, ports,
+# tags, digests).
+def _valid_image_ref(s)
+  if s == ""
+    return false
+  end
+  for ch in str.chars(s)
+    is_letter = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+    is_digit  = ch >= "0" && ch <= "9"
+    is_safe   = ch == "." || ch == "_" || ch == "-" || ch == "/" || ch == ":" || ch == "@" || ch == "+"
+    if !is_letter && !is_digit && !is_safe
+      return false
+    end
+  end
+  return true
+end
+
+# Parse YAML-ish front matter from a Yolofile. The front matter, if present,
+# is delimited by `---` lines at the very top of the file:
+#
+#   ---
+#   image: fedora:44
+#   cpus: 4
+#   memory: 4G
+#   disk-size: 64G
+#   ---
+#   #!/usr/bin/env bash
+#   ...
+#
+# Returns {fm: {normalized_key => value, ...}, body: "rest of file", err: ""}.
+# Keys are lowercased and `-` is rewritten to `_`. Values are trimmed and
+# have optional surrounding quotes stripped. Lines starting with `#` and
+# blank lines inside the front matter block are ignored. If the file does
+# not start with `---`, the fast path returns {fm: {}, body: content, err: ""}
+# so the bash body is bit-identical (and its sha256 unchanged) for existing
+# pre-front-matter Yolofiles. An opening `---` without a matching closing
+# `---` is an error — better than executing `---` as bash.
+def parse_content(content)
+  if !str.starts_with(content, "---")
+    return {fm: {}, body: content, err: ""}
+  end
+  # The "---" must be a full line (followed by \n, \r\n, or EOF).
+  if len(content) > 3
+    c3 = str.slice(content, 3, 4)
+    if c3 != "\n" && c3 != "\r"
+      return {fm: {}, body: content, err: ""}
+    end
+  end
+
+  lines = []
+  for line in str.each_line(content)
+    lines = append(lines, str.trim_suffix(line, "\r"))
+  end
+  fm = {}
+  i = 1
+  closed = false
+  while i < len(lines)
+    t = str.trim(lines[i])
+    if t == "---"
+      closed = true
+      i = i + 1
+      break
+    end
+    if t != "" && !str.starts_with(t, "#")
+      idx = str.index(t, ":")
+      if idx > 0
+        k = str.lower(str.trim(str.slice(t, 0, idx)))
+        k = str.replace(k, "-", "_")
+        v = _unquote(str.trim(str.slice(t, idx + 1, len(t))))
+        fm[k] = v
+      end
+    end
+    i = i + 1
+  end
+  if !closed
+    return {fm: {}, body: "", err: "front matter opens with '---' but is missing a closing '---' delimiter"}
+  end
+  body_lines = []
+  while i < len(lines)
+    body_lines = append(body_lines, lines[i])
+    i = i + 1
+  end
+  return {fm: fm, body: str.join(body_lines, "\n"), err: ""}
+end
+
+# Convenience: read the Yolofile from cwd and parse it. Returns the same
+# shape as parse_content(). Caller is responsible for checking exists()
+# first; this will raise if the file is missing.
+def read_and_parse
+  return parse_content(os.read_file(path()))
+end
+
+# ---------------- Front matter validation ----------------
+# Precedence (top wins): CLI flag > Yolofile front matter > $YOLO_* env vars
+# > built-in defaults. This module only produces the "Yolofile front matter"
+# slice; the caller (yolo.rugo main) does the actual precedence merge
+# because module functions can't mutate yolo.rugo's top-level vars.
+#
+# `backends` is the BACKENDS hash (used for backend: validation).
+# `ai_agents` is the AI_AGENTS hash (used for ai-agent: validation).
+# `default_ai_agent` is the default agent name (substituted for ai-agent: true).
+#
+# Returns a hash of resolved overrides; on validation failure, prints a
+# message and exits the process (same hard-fail semantics as the original).
+def validate(fm, backends, ai_agents, default_ai_agent)
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true}
+  for k in fm
+    if known[k] != true
+      _warn("Yolofile: ignoring unknown front matter key '#{k}'")
+    end
+  end
+  v_image = fm["image"]
+  if v_image != nil && v_image != ""
+    if !_valid_image_ref(v_image)
+      _err("Yolofile: invalid 'image' value: '#{v_image}' (rejected — only [A-Za-z0-9._/:@+-] allowed in image references via front matter)")
+      os.exit(2)
+    end
+    out.image = v_image
+  end
+  v_cpus = fm["cpus"]
+  if v_cpus != nil && v_cpus != ""
+    n = try conv.to_i(v_cpus) or -1
+    if n <= 0
+      _err("Yolofile: invalid 'cpus' value: '#{v_cpus}' (expected a positive integer)")
+      os.exit(2)
+    end
+    out.cpus = conv.to_s(n)
+  end
+  v_mem = fm["memory"]
+  if v_mem != nil && v_mem != ""
+    sz = _parse_size(v_mem)
+    if sz == ""
+      _err("Yolofile: invalid 'memory' value: '#{v_mem}' (expected e.g. 4G, 2048M, or a bare MiB integer)")
+      os.exit(2)
+    end
+    out.mem_mb = sz
+  end
+  ds = ""
+  v_ds  = fm["disk_size"]
+  v_d   = fm["disk"]
+  v_dmb = fm["disk_mb"]
+  if v_ds != nil && v_ds != ""
+    ds = v_ds
+  elsif v_d != nil && v_d != ""
+    ds = v_d
+  elsif v_dmb != nil && v_dmb != ""
+    ds = v_dmb
+  end
+  if ds != ""
+    sz = _parse_size(ds)
+    if sz == ""
+      _err("Yolofile: invalid 'disk-size' value: '#{ds}' (expected e.g. 32G, 16384, etc.)")
+      os.exit(2)
+    end
+    out.disk_mb = sz
+  end
+  v_backend = fm["backend"]
+  if v_backend != nil && v_backend != ""
+    if backends[v_backend] == nil
+      names = []
+      for n in backends
+        names = append(names, n)
+      end
+      known_list = str.join(names, ", ")
+      _err("Yolofile: unknown 'backend' value: '#{v_backend}' (known: #{known_list})")
+      os.exit(2)
+    end
+    out.backend = v_backend
+  end
+  v_gui = fm["gui"]
+  if v_gui != nil && v_gui != ""
+    lv = str.lower(v_gui)
+    if lv == "true" || lv == "yes" || lv == "1" || lv == "on"
+      out.gui = true
+      out.gui_set = true
+    elsif lv == "false" || lv == "no" || lv == "0" || lv == "off"
+      out.gui = false
+      out.gui_set = true
+    else
+      _err("Yolofile: invalid 'gui' value: '#{v_gui}' (expected true/false)")
+      os.exit(2)
+    end
+  end
+  v_agent = fm["ai_agent"]
+  if v_agent != nil
+    if v_agent == "" || v_agent == "none" || v_agent == "false"
+      out.agent = ""
+      out.agent_set = true
+    elsif v_agent == "default" || v_agent == "true"
+      out.agent = default_ai_agent
+      out.agent_set = true
+    else
+      if ai_agents[v_agent] == nil
+        names = []
+        for n in ai_agents
+          names = append(names, n)
+        end
+        known_list = str.join(names, ", ")
+        _err("Yolofile: unknown 'ai-agent' value: '#{v_agent}' (known: #{known_list})")
+        os.exit(2)
+      end
+      out.agent = v_agent
+      out.agent_set = true
+    end
+  end
+  return out
+end

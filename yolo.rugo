@@ -25,8 +25,6 @@ use "color"
 use "crypto"
 use "fmt"
 use "filepath"
-use "conv"
-use "time"
 
 # ---------------- Backends ----------------
 # Each backend lives at `backends/<name>.rugo` and exposes a `make()` factory
@@ -36,6 +34,14 @@ use "time"
 # Adding a new backend: drop a `backends/<name>.rugo` file, then add it to
 # both the `require` line below and the BACKENDS registry.
 require "backends" with matchlock, podman
+
+# CLI parsing + help text and Yolofile parsing / front-matter validation
+# both live in sibling modules to keep this file from sprawling further.
+# They're pure (no state) — yolo.rugo's main block passes in the bits of
+# context they need (BACKENDS, AI_AGENTS, VERSION) since Rugo modules can
+# only see what they require, never the other direction.
+require "cli"
+require "yolofile"
 
 BACKENDS = {
   "matchlock" => matchlock.make(),
@@ -520,219 +526,9 @@ def ensure_vm(name)
   return start_vm(name)
 end
 
-# ---------------- Arg parsing ----------------
-# Parse a human disk size like "32G", "32g", "32M", "32m" (with optional
-# trailing "B"/"b" — so "32gb" / "32mb" also work), or a bare integer
-# interpreted as MiB (e.g. "16384") for parity with $YOLO_DISK_MB. Returns
-# the size as a MiB integer string, or "" if the input can't be parsed.
-def parse_disk_size(s)
-  if s == ""
-    return ""
-  end
-  lower = str.lower(s)
-  if str.ends_with(lower, "b")
-    lower = str.slice(lower, 0, len(lower) - 1)
-  end
-  multiplier = 1
-  unit_len = 0
-  if str.ends_with(lower, "g")
-    multiplier = 1024
-    unit_len = 1
-  elsif str.ends_with(lower, "m")
-    multiplier = 1
-    unit_len = 1
-  end
-  num_str = lower
-  if unit_len > 0
-    num_str = str.slice(lower, 0, len(lower) - unit_len)
-  end
-  if num_str == ""
-    return ""
-  end
-  n = try conv.to_i(num_str) or -1
-  if n <= 0
-    return ""
-  end
-  return conv.to_s(n * multiplier)
-end
-
-# Parse a flat argv into: subcommand, -n name, --provisioner, --ai-agent,
-# --backend, --gui / --no-gui, rest, -- passthrough.
-def parse_args(args)
-  sub = ""
-  name = ""
-  prov = ""
-  no_prov = false
-  agent = ""
-  agent_set = false
-  rest = []
-  passthrough = []
-  in_passthrough = false
-  out_path = ""
-  force = false
-  disk_mb_override = ""
-  backend = ""
-  gui = false
-  gui_set = false
-  i = 0
-  while i < len(args)
-    a = args[i]
-    if in_passthrough
-      passthrough = append(passthrough, a)
-    elsif a == "--"
-      in_passthrough = true
-    elsif a == "-n" || a == "--name"
-      i = i + 1
-      name = args[i]
-    elsif a == "--provisioner" || a == "-P"
-      i = i + 1
-      prov = args[i]
-    elsif a == "--no-provision" || a == "--no-provisioner"
-      no_prov = true
-    elsif a == "-o" || a == "--output"
-      i = i + 1
-      out_path = args[i]
-    elsif a == "--force"
-      force = true
-    elsif a == "--backend" || a == "-b"
-      i = i + 1
-      if i >= len(args)
-        err_("--backend requires a value (matchlock or podman)")
-        os.exit(2)
-      end
-      backend = args[i]
-    elsif a == "--gui"
-      gui = true
-      gui_set = true
-    elsif a == "--no-gui"
-      gui = false
-      gui_set = true
-    elsif a == "--disk-size"
-      i = i + 1
-      if i >= len(args)
-        err_("--disk-size requires a value (e.g. 32G, 512M, or a bare MiB integer)")
-        os.exit(2)
-      end
-      parsed_sz = parse_disk_size(args[i])
-      if parsed_sz == ""
-        err_("invalid --disk-size value: '#{args[i]}' (expected e.g. 32G, 32g, 512M, 512m, or a bare MiB integer)")
-        os.exit(2)
-      end
-      disk_mb_override = parsed_sz
-    elsif a == "--ai-agent"
-      # Optional value: if the next arg exists and isn't another flag /
-      # subcommand, consume it as the agent name; otherwise default.
-      agent_set = true
-      nxt = ""
-      if i + 1 < len(args)
-        nxt = args[i + 1]
-      end
-      if nxt != "" && !str.starts_with(nxt, "-") && nxt != "--"
-        # Heuristic: treat as a value only if it matches a known agent name.
-        # Otherwise it's a subcommand or positional and we keep the default.
-        if AI_AGENTS[nxt] != nil
-          agent = nxt
-          i = i + 1
-        else
-          agent = DEFAULT_AI_AGENT
-        end
-      else
-        agent = DEFAULT_AI_AGENT
-      end
-    elsif a == "--no-ai-agent"
-      agent = ""
-      agent_set = true
-    elsif a == "-h" || a == "--help"
-      print_help()
-      os.exit(0)
-    elsif a == "-V" || a == "--version"
-      print_version()
-      os.exit(0)
-    elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners" || a == "export" || a == "import")
-      sub = a
-    else
-      rest = append(rest, a)
-    end
-    i = i + 1
-  end
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb_override, backend: backend, gui: gui, gui_set: gui_set}
-end
-
-def print_version
-  puts "yolo #{VERSION}"
-end
-
-def print_help
-  puts "yolo — fast persistent per-directory dev environments (matchlock VMs or podman containers)."
-  puts ""
-  puts "Usage:"
-  puts "  yolo                            Ensure VM, auto-provision (once), shell in."
-  puts "  yolo -- CMD ARGS...             Run CMD inside the VM."
-  puts "  yolo --provisioner NAME [...]   Use a specific provisioner (overrides Yolofile)."
-  puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
-  puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode)."
-  puts "                                  Known agents: copilot, opencode."
-  puts "  yolo --backend NAME [...]       Pick a backend: matchlock (microVM, default)"
-  puts "                                  or podman (container, supports GUI). The"
-  puts "                                  binding is sticky: once a VM is created the"
-  puts "                                  backend is recorded and re-used on attach."
-  puts "  yolo --gui [...]                Bind-mount the host Wayland socket into the"
-  puts "                                  guest so graphical apps render on your"
-  puts "                                  compositor. Requires --backend podman."
-  puts "  yolo -n NAME [...]              Use a named VM."
-  puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."
-  puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
-  puts "                                  MiB integer. Takes effect when the VM is"
-  puts "                                  first created."
-  puts "  yolo -V, --version              Print yolo version and exit."
-  puts "  yolo -h, --help                 Print this help and exit."
-  puts "  yolo ls                         List tracked VMs with live status."
-  puts "  yolo du                         List tracked VMs with disk usage."
-  puts "  yolo stop [-n NAME]             Stop VM (podman: preserves state)."
-  puts "  yolo rm   [-n NAME]             Stop + remove VM and binding."
-  puts "  yolo logs [-n NAME]             Show VM log."
-  puts "  yolo id   [-n NAME]             Print vm-id."
-  puts "  yolo status [-n NAME]           Print state + vm-id + applied provisioners."
-  puts "  yolo prune                      Drop dead name bindings."
-  puts "  yolo provision [--provisioner NAME] [-n NAME]"
-  puts "                                  Force re-apply a provisioner."
-  puts "  yolo provisioners               List provisioners (embedded + ./Yolofile)."
-  puts ""
-  puts "  yolo export [-n NAME] [-o FILE] Export VM rootfs + state into a single"
-  puts "                                  .tar.gz (matchlock backend only)."
-  puts "  yolo import FILE [-n NAME] [--force]"
-  puts "                                  Import an export bundle; pins a custom"
-  puts "                                  matchlock image so the first `yolo -n NAME`"
-  puts "                                  boots from the captured rootfs."
-  puts ""
-  puts "Provisioner resolution (in order):"
-  puts "  1. --provisioner NAME (explicit)"
-  puts "  2. ./Yolofile (if present)"
-  puts "  3. Auto-detected from $PWD:"
-  puts "       go.mod / go.sum / *.go              → fedora-go"
-  puts "       Cargo.toml / rust-toolchain.toml    → fedora-rust"
-  puts "       Gemfile / *.gemspec / .ruby-version → fedora-ruby"
-  puts "       build.gradle[.kts] / settings.gradle → fedora-android"
-  puts "  4. Otherwise: no provisioner runs."
-  puts ""
-  puts "Yolofile:"
-  puts "  A plain bash script (run as root in the VM). Edit-and-rerun"
-  puts "  automatically re-provisions (content-hashed for the marker)."
-  puts "  May begin with a YAML-style '---' front matter block declaring"
-  puts "  VM-creation overrides (image, cpus, memory, disk-size, backend,"
-  puts "  gui). See docs/05-yolofile.md for the full format."
-  puts ""
-  puts "Env vars (defaults):"
-  puts "  YOLO_IMAGE=fedora:44       OCI image (default depends on backend)"
-  puts "  YOLO_CPUS=2                vCPU count"
-  puts "  YOLO_MEM_MB=2048           Memory (MiB)"
-  puts "  YOLO_DISK_MB=32768         Rootfs disk (MiB) (matchlock only)"
-  puts "  YOLO_WORKSPACE=/work       Guest mount point for $PWD"
-  puts "  YOLO_ALLOW=                Comma list of allow-listed hosts (enables MITM)"
-  puts "  YOLO_USER=                 Run as uid:gid inside guest"
-  puts "  YOLO_NAME=                 Override the auto-derived per-CWD name"
-  puts "  YOLO_BACKEND=              Default backend (matchlock or podman)"
-end
+# CLI arg parsing, --help, --version, and --disk-size value parsing all
+# live in cli.rugo. See that module for the full flag table and the
+# returned hash shape.
 
 def default_name
   override = env_or("YOLO_NAME", "")
@@ -1130,8 +926,8 @@ end
 def cmd_provisioners
   auto = ""
   default_label = ""
-  if has_yolofile()
-    yp = yolofile_path()
+  if yolofile.exists()
+    yp = yolofile.path()
     default_label = "Yolofile (#{yp})"
   else
     auto = detect_provisioner()
@@ -1145,14 +941,14 @@ def cmd_provisioners
   puts "Available provisioners (default: #{default_label}):"
   for n in PROVISIONERS
     marker = "  "
-    if !has_yolofile() && n == auto
+    if !yolofile.exists() && n == auto
       marker = color.green("* ")
     end
     puts "#{marker}#{n}"
   end
-  if has_yolofile()
+  if yolofile.exists()
     star = color.green("* ")
-    yp = yolofile_path()
+    yp = yolofile.path()
     puts "#{star}yolofile  (#{yp})"
   end
   puts ""
@@ -1172,228 +968,16 @@ end
 # bash body (excluding any leading front matter) so editing the script
 # triggers a re-provision on the next attach. Editing only the front matter
 # does NOT re-provision — see docs/05-yolofile.md for the full contract.
-
-YOLOFILE = "Yolofile"
-
-def yolofile_path
-  return filepath.join(os.cwd(), YOLOFILE)
-end
-
-def has_yolofile
-  return os.file_exists(yolofile_path())
-end
-
-# Strip optional surrounding double or single quotes from a value. Used when
-# parsing Yolofile front matter values like `image: "fedora:44"`.
-def unquote_value(s)
-  if len(s) >= 2
-    first = str.slice(s, 0, 1)
-    last = str.slice(s, len(s) - 1, len(s))
-    if (first == "\"" && last == "\"") || (first == "'" && last == "'")
-      return str.slice(s, 1, len(s) - 1)
-    end
-  end
-  return s
-end
-
-# Conservative allowlist for OCI image references used in front matter.
-# Front matter is repo-controlled and flows into the host-side `matchlock run`
-# shell command, so any value that ends up there must be tightly bounded:
-# we reject quotes, whitespace, $, backticks, semicolons, and anything else
-# that could escape the surrounding double quotes in the rendered script.
-# This is stricter than what OCI technically allows but covers the universe
-# of reasonable image references (registries, ports, tags, digests).
-def valid_image_ref(s)
-  if s == ""
-    return false
-  end
-  for ch in str.chars(s)
-    is_letter = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
-    is_digit  = ch >= "0" && ch <= "9"
-    is_safe   = ch == "." || ch == "_" || ch == "-" || ch == "/" || ch == ":" || ch == "@" || ch == "+"
-    if !is_letter && !is_digit && !is_safe
-      return false
-    end
-  end
-  return true
-end
-
-# Parse YAML-ish front matter from a Yolofile. The front matter, if present,
-# is delimited by `---` lines at the very top of the file:
 #
-#   ---
-#   image: fedora:44
-#   cpus: 4
-#   memory: 4G
-#   disk-size: 64G
-#   ---
-#   #!/usr/bin/env bash
-#   ...
-#
-# Returns {fm: {normalized_key => value, ...}, body: "rest of file"}. Keys
-# are lowercased and `-` is rewritten to `_`. Values are trimmed and have
-# optional surrounding quotes stripped. Lines starting with `#` and blank
-# lines inside the front matter block are ignored. If the file does not
-# start with `---`, the fast path returns `{fm: {}, body: content}` so the
-# bash body is bit-identical (and its sha256 unchanged) for existing
-# pre-front-matter Yolofiles. An opening `---` without a matching closing
-# `---` is an error — better than executing `---` as bash.
-def parse_yolofile(content)
-  if !str.starts_with(content, "---")
-    return {fm: {}, body: content, err: ""}
-  end
-  # The "---" must be a full line (followed by \n, \r\n, or EOF).
-  if len(content) > 3
-    c3 = str.slice(content, 3, 4)
-    if c3 != "\n" && c3 != "\r"
-      return {fm: {}, body: content, err: ""}
-    end
-  end
-
-  lines = []
-  for line in str.each_line(content)
-    lines = append(lines, str.trim_suffix(line, "\r"))
-  end
-  fm = {}
-  i = 1
-  closed = false
-  while i < len(lines)
-    t = str.trim(lines[i])
-    if t == "---"
-      closed = true
-      i = i + 1
-      break
-    end
-    if t != "" && !str.starts_with(t, "#")
-      idx = str.index(t, ":")
-      if idx > 0
-        k = str.lower(str.trim(str.slice(t, 0, idx)))
-        k = str.replace(k, "-", "_")
-        v = unquote_value(str.trim(str.slice(t, idx + 1, len(t))))
-        fm[k] = v
-      end
-    end
-    i = i + 1
-  end
-  if !closed
-    return {fm: {}, body: "", err: "front matter opens with '---' but is missing a closing '---' delimiter"}
-  end
-  body_lines = []
-  while i < len(lines)
-    body_lines = append(body_lines, lines[i])
-    i = i + 1
-  end
-  return {fm: fm, body: str.join(body_lines, "\n"), err: ""}
-end
-
-# Apply Yolofile front matter to the mutable resource globals. Called from
-# main only for subcommands that may create/recreate a VM, so a malformed
-# Yolofile cannot block `yolo ls`, `yolo stop`, etc.
-#
-# Precedence (top wins): CLI flag > Yolofile front matter > $YOLO_* env vars
-# > built-in defaults.
-#
-# Implemented inline-ish via a hash return; the caller does the actual
-# assignments because rugo functions cannot mutate module-level variables.
-def validate_frontmatter(fm)
-  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false}
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true}
-  for k in fm
-    if known[k] != true
-      warn("Yolofile: ignoring unknown front matter key '#{k}'")
-    end
-  end
-  v_image = fm["image"]
-  if v_image != nil && v_image != ""
-    if !valid_image_ref(v_image)
-      err_("Yolofile: invalid 'image' value: '#{v_image}' (rejected — only [A-Za-z0-9._/:@+-] allowed in image references via front matter)")
-      os.exit(2)
-    end
-    out.image = v_image
-  end
-  v_cpus = fm["cpus"]
-  if v_cpus != nil && v_cpus != ""
-    n = try conv.to_i(v_cpus) or -1
-    if n <= 0
-      err_("Yolofile: invalid 'cpus' value: '#{v_cpus}' (expected a positive integer)")
-      os.exit(2)
-    end
-    out.cpus = conv.to_s(n)
-  end
-  v_mem = fm["memory"]
-  if v_mem != nil && v_mem != ""
-    sz = parse_disk_size(v_mem)
-    if sz == ""
-      err_("Yolofile: invalid 'memory' value: '#{v_mem}' (expected e.g. 4G, 2048M, or a bare MiB integer)")
-      os.exit(2)
-    end
-    out.mem_mb = sz
-  end
-  ds = ""
-  v_ds  = fm["disk_size"]
-  v_d   = fm["disk"]
-  v_dmb = fm["disk_mb"]
-  if v_ds != nil && v_ds != ""
-    ds = v_ds
-  elsif v_d != nil && v_d != ""
-    ds = v_d
-  elsif v_dmb != nil && v_dmb != ""
-    ds = v_dmb
-  end
-  if ds != ""
-    sz = parse_disk_size(ds)
-    if sz == ""
-      err_("Yolofile: invalid 'disk-size' value: '#{ds}' (expected e.g. 32G, 16384, etc.)")
-      os.exit(2)
-    end
-    out.disk_mb = sz
-  end
-  v_backend = fm["backend"]
-  if v_backend != nil && v_backend != ""
-    if BACKENDS[v_backend] == nil
-      err_("Yolofile: unknown 'backend' value: '#{v_backend}' (known: #{known_backends()})")
-      os.exit(2)
-    end
-    out.backend = v_backend
-  end
-  v_gui = fm["gui"]
-  if v_gui != nil && v_gui != ""
-    lv = str.lower(v_gui)
-    if lv == "true" || lv == "yes" || lv == "1" || lv == "on"
-      out.gui = true
-      out.gui_set = true
-    elsif lv == "false" || lv == "no" || lv == "0" || lv == "off"
-      out.gui = false
-      out.gui_set = true
-    else
-      err_("Yolofile: invalid 'gui' value: '#{v_gui}' (expected true/false)")
-      os.exit(2)
-    end
-  end
-  v_agent = fm["ai_agent"]
-  if v_agent != nil
-    if v_agent == "" || v_agent == "none" || v_agent == "false"
-      out.agent = ""
-      out.agent_set = true
-    elsif v_agent == "default" || v_agent == "true"
-      out.agent = DEFAULT_AI_AGENT
-      out.agent_set = true
-    else
-      if AI_AGENTS[v_agent] == nil
-        names = []
-        for n in AI_AGENTS
-          names = append(names, n)
-        end
-        known_list = str.join(names, ", ")
-        err_("Yolofile: unknown 'ai-agent' value: '#{v_agent}' (known: #{known_list})")
-        os.exit(2)
-      end
-      out.agent = v_agent
-      out.agent_set = true
-    end
-  end
-  return out
-end
+# Parsing + front matter validation live in yolofile.rugo; this file only
+# orchestrates (where to read it, when to apply overrides, and how to feed
+# the bash body to the backend). The yolofile module exposes:
+#   - yolofile.path()           absolute path to ./Yolofile
+#   - yolofile.exists()         bool
+#   - yolofile.read_and_parse() {fm:, body:, err:}
+#   - yolofile.parse_content(s) same shape, from a literal string
+#   - yolofile.validate(fm, backends, ai_agents, default_ai_agent)
+#                               typed overrides hash (image/cpus/mem_mb/...)
 
 # Best-effort: pick a built-in provisioner based on files in $PWD.
 # Returns the provisioner name (key into PROVISIONERS) or "" if no signal.
@@ -1445,7 +1029,7 @@ end
 def resolve_provisioner(prov_name)
   pname = prov_name
   if pname == ""
-    if has_yolofile()
+    if yolofile.exists()
       pname = "__yolofile__"
     else
       pname = detect_provisioner()
@@ -1458,8 +1042,7 @@ def resolve_provisioner(prov_name)
   src = ""
   display = pname
   if pname == "__yolofile__"
-    raw = os.read_file(yolofile_path())
-    parsed = parse_yolofile(raw)
+    parsed = yolofile.read_and_parse()
     if parsed.err != ""
       err_("Yolofile: #{parsed.err}")
       os.exit(2)
@@ -1503,8 +1086,8 @@ def apply_provisioner(name, vm_id, prov_name)
     for n in PROVISIONERS
       puts "  #{n}"
     end
-    if has_yolofile()
-      puts "  yolofile (#{yolofile_path()})"
+    if yolofile.exists()
+      puts "  yolofile (#{yolofile.path()})"
     end
     os.exit(1)
   end
@@ -1678,9 +1261,9 @@ def cmd_export(name, out_path)
     applied_json = "[" + str.join(parts, ",") + "]"
   end
 
-  has_yolofile = "false"
+  yolofile_flag = "false"
   if yolofile_src != ""
-    has_yolofile = "true"
+    yolofile_flag = "true"
   end
 
   meta = "{\n" +
@@ -1697,7 +1280,7 @@ def cmd_export(name, out_path)
     "  \"cpus\": \"#{json_escape(cpus)}\",\n" +
     "  \"mem_mb\": \"#{json_escape(mem_mb)}\",\n" +
     "  \"disk_mb\": \"#{json_escape(disk_mb)}\",\n" +
-    "  \"has_yolofile\": #{has_yolofile},\n" +
+    "  \"has_yolofile\": #{yolofile_flag},\n" +
     "  \"applied\": #{applied_json}\n" +
     "}\n"
 
@@ -1947,7 +1530,7 @@ def json_string_field(src, key)
 end
 
 # ---------------- Main ----------------
-parsed = parse_args(os.args())
+parsed = cli.parse_args(os.args(), AI_AGENTS, DEFAULT_AI_AGENT, VERSION)
 
 # Yolofile front matter: applied only for subcommands that may create or
 # recreate a VM. This is deliberate — a malformed Yolofile must not block
@@ -1955,13 +1538,13 @@ parsed = parse_args(os.args())
 # already-existing VM state regardless of the (possibly broken) file.
 sub = parsed.sub
 applies_resources = (sub == "" || sub == "provision" || sub == "export")
-if applies_resources && has_yolofile()
-  yf_parsed = parse_yolofile(os.read_file(yolofile_path()))
+if applies_resources && yolofile.exists()
+  yf_parsed = yolofile.read_and_parse()
   if yf_parsed.err != ""
     err_("Yolofile: #{yf_parsed.err}")
     os.exit(2)
   end
-  fm_resolved = validate_frontmatter(yf_parsed.fm)
+  fm_resolved = yolofile.validate(yf_parsed.fm, BACKENDS, AI_AGENTS, DEFAULT_AI_AGENT)
   if fm_resolved.image != ""
     image = fm_resolved.image
   end

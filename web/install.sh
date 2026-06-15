@@ -6,7 +6,7 @@
 #
 # Or override versions:
 #   curl -fsSL https://yolo.rbel.co/install.sh \
-#     | bash -s -- --yolo-version v0.1.0 --matchlock-version 0.2.13
+#     | bash -s -- --yolo-version v0.1.0 --matchlock-version 0.2.15
 #
 # Supported hosts:
 #   - Fedora (Workstation/Server/Cloud; not Atomic/rpm-ostree variants)
@@ -36,7 +36,7 @@ YOLO_VERSION="${YOLO_VERSION:-}"                    # empty = latest
 # matchlock is pinned to a known-good release for reproducible installs.
 # Bump this after verifying yolo still works against the new release
 # (see release notes at https://github.com/jingkaihe/matchlock/releases).
-MATCHLOCK_VERSION="${MATCHLOCK_VERSION:-0.2.13}"
+MATCHLOCK_VERSION="${MATCHLOCK_VERSION:-0.2.15}"
 YOLO_PREFIX="${YOLO_PREFIX:-$HOME/.local/bin}"
 
 SKIP_MATCHLOCK=0

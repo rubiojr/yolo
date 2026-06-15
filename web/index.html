@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>yolo hub — grab-and-go dev environments</title>
+<meta name="description" content="A hub of ready-to-run Yolofiles for yolo. Pick an environment, copy one command, and get a throwaway dev VM with the tool already installed." />
+<meta name="theme-color" content="#0a0c10" />
+<meta property="og:title" content="yolo hub" />
+<meta property="og:description" content="Grab-and-go dev environments. Copy a command, get a VM." />
+<meta property="og:type" content="website" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1117'/%3E%3Cpath d='M16 21 l11 11 -11 11' fill='none' stroke='%23ff8a3d' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='33' y='40' width='17' height='6' rx='3' fill='%23ff8a3d'/%3E%3C/svg%3E" />
+<style>
+  :root {
+    --bg: #0a0c10;
+    --bg-2: #0d1117;
+    --surface: #11161d;
+    --surface-2: #161c24;
+    --inset: #080a0e;
+    --border: #222a33;
+    --border-2: #2d3742;
+    --text: #e6edf3;
+    --text-dim: #9aa7b4;
+    --text-faint: #69757f;
+    --accent: #ff8a3d;
+    --accent-2: #ff5e3a;
+    --accent-soft: rgba(255, 138, 61, 0.13);
+    --accent-line: rgba(255, 138, 61, 0.35);
+    --green: #7ee787;
+    --green-dim: #4ac26b;
+    --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --radius: 14px;
+    --maxw: 1120px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 50% -200px, rgba(255, 138, 61, 0.10), transparent 70%),
+      radial-gradient(900px 500px at 85% -100px, rgba(255, 94, 58, 0.06), transparent 70%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 22px; }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    backdrop-filter: blur(10px);
+    background: rgba(10, 12, 16, 0.72);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 58px;
+  }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+  .brand .logo { width: 26px; height: 26px; flex: none; }
+  .brand b { color: var(--accent); }
+  .brand .slash { color: var(--text-faint); }
+  .brand .hub { color: var(--text-dim); font-weight: 600; }
+  .nav { display: flex; align-items: center; gap: 4px; }
+  .nav a {
+    color: var(--text-dim);
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 13.5px;
+  }
+  .nav a:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+  .nav a.gh { color: var(--text); }
+  .nav a.gh svg { vertical-align: -3px; margin-right: 6px; }
+  .nav a.rel {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--green);
+    border: 1px solid var(--border-2);
+    font-size: 12.5px;
+    padding: 5px 11px;
+  }
+  .nav a.rel:hover { color: var(--green); border-color: var(--green-dim); background: rgba(126, 231, 135, 0.08); }
+  .nav a.rel .dot {
+    width: 7px; height: 7px; border-radius: 50%; flex: none;
+    background: var(--green-dim);
+    box-shadow: 0 0 0 3px rgba(126, 231, 135, 0.15);
+  }
+  .nav a.rel.loading { color: var(--text-faint); }
+  .nav a.rel.loading .dot { background: var(--text-faint); box-shadow: none; }
+
+  /* ---------- Hero ---------- */
+  .hero { padding: 64px 0 30px; text-align: center; }
+  .hero h1 {
+    margin: 0;
+    font-size: clamp(40px, 8vw, 76px);
+    line-height: 1.02;
+    letter-spacing: -0.04em;
+    font-weight: 800;
+  }
+  .hero h1 .y {
+    background: linear-gradient(120deg, var(--accent) 10%, var(--accent-2) 90%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero h1 .s { color: var(--text-faint); font-weight: 500; }
+  .hero h1 .h { color: var(--text-dim); }
+  .hero .tag {
+    margin: 20px auto 0;
+    max-width: 660px;
+    color: var(--text-dim);
+    font-size: clamp(15px, 2.2vw, 18px);
+  }
+  .hero .tag b { color: var(--text); font-weight: 600; }
+  .hero .tag .linux { color: var(--text-faint); white-space: nowrap; }
+
+  .hero .install {
+    margin: 26px auto 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .hero .install .lbl { color: var(--text-faint); font-size: 13px; }
+
+  /* inline copy pill */
+  .copyline {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--inset);
+    border: 1px solid var(--border-2);
+    border-radius: 10px;
+    padding: 8px 8px 8px 14px;
+    font-size: 13.5px;
+    max-width: 100%;
+  }
+  .copyline code { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .copyline code .d { color: var(--accent); }
+
+  /* ---------- Toolbar / search ---------- */
+  .toolbar {
+    position: sticky;
+    top: 58px;
+    z-index: 30;
+    padding: 16px 0;
+    background: linear-gradient(180deg, var(--bg) 60%, rgba(10, 12, 16, 0.0));
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    border-radius: 12px;
+    padding: 0 14px;
+    height: 52px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .search:focus-within {
+    border-color: var(--accent-line);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+  .search .pr { color: var(--accent); font-weight: 700; flex: none; }
+  .search input {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 15px;
+    min-width: 0;
+  }
+  .search input::placeholder { color: var(--text-faint); }
+  .search .kbd {
+    flex: none;
+    color: var(--text-faint);
+    border: 1px solid var(--border-2);
+    border-radius: 6px;
+    padding: 2px 7px;
+    font-size: 12px;
+  }
+  .count { padding: 8px 2px 0; color: var(--text-faint); font-size: 12.5px; height: 22px; }
+  .count b { color: var(--text-dim); font-weight: 600; }
+
+  /* ---------- Grid ---------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
+    gap: 18px;
+    padding-bottom: 30px;
+  }
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: var(--accent-line);
+    box-shadow: 0 18px 40px -24px rgba(0, 0, 0, 0.85), 0 0 0 1px var(--accent-soft);
+  }
+  .card .head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .card h3 {
+    margin: 0;
+    font-size: 18px;
+    letter-spacing: -0.01em;
+    font-weight: 700;
+    word-break: break-word;
+  }
+  .card h3 .at { color: var(--text-faint); font-weight: 500; }
+  .card .src {
+    flex: none;
+    color: var(--text-faint);
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .card .src:hover { color: var(--accent); border-color: var(--accent-line); text-decoration: none; }
+  .card .desc {
+    margin: 11px 0 0;
+    color: var(--text-dim);
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .card .desc a { color: var(--accent); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 15px 0 0; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 4px 10px 4px 9px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .chip svg { width: 13px; height: 13px; opacity: 0.85; flex: none; }
+  .chip.muted { color: var(--text-faint); }
+  .chip.accent { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+
+  .card .spacer { flex: 1; min-height: 16px; }
+
+  /* command block */
+  .cmd-block {
+    position: relative;
+    margin-top: 16px;
+    background: var(--inset);
+    border: 1px solid var(--border-2);
+    border-radius: 10px;
+  }
+  .cmd-block pre {
+    margin: 0;
+    padding: 13px 52px 13px 14px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .cmd-block code { color: var(--green); }
+  .cmd-block code .pr { color: var(--accent); }
+  .cmd-block code .flag { color: var(--text-dim); }
+  .copybtn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 34px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface-2);
+    border: 1px solid var(--border-2);
+    border-radius: 8px;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.14s;
+  }
+  .copybtn:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+  .copybtn svg { width: 15px; height: 15px; }
+  .copybtn.done { color: var(--green); border-color: var(--green-dim); background: rgba(126, 231, 135, 0.1); }
+
+  .card .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: transparent;
+    border: 1px solid var(--border-2);
+    color: var(--text-dim);
+    border-radius: 9px;
+    padding: 8px 13px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: all 0.14s;
+  }
+  .btn:hover { color: var(--text); border-color: var(--border-2); background: var(--surface-2); }
+  .btn svg { width: 14px; height: 14px; }
+  .btn.primary { color: var(--accent); border-color: var(--accent-line); }
+  .btn.primary:hover { background: var(--accent-soft); }
+
+  /* states */
+  .state {
+    text-align: center;
+    padding: 70px 20px;
+    color: var(--text-faint);
+    font-size: 14px;
+  }
+  .state .spin {
+    display: inline-block;
+    width: 22px; height: 22px;
+    border: 2.5px solid var(--border-2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .state b { color: var(--text-dim); }
+  .state .big { font-size: 30px; margin-bottom: 6px; }
+
+  /* ---------- Footer ---------- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 30px 0 50px;
+    color: var(--text-faint);
+    font-size: 13px;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 26px; align-items: center; justify-content: space-between; }
+  footer .links { display: flex; flex-wrap: wrap; gap: 18px; }
+  footer a { color: var(--text-dim); }
+
+  /* ---------- Modal ---------- */
+  .modal-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(4, 6, 9, 0.72);
+    backdrop-filter: blur(4px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 22px;
+  }
+  .modal-bg.open { display: flex; }
+  .modal {
+    width: min(820px, 100%);
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-2);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.9);
+    overflow: hidden;
+  }
+  .modal .m-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 15px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal .m-head h3 { margin: 0; font-size: 16px; }
+  .modal .m-head h3 .at { color: var(--text-faint); font-weight: 500; }
+  .modal .m-close {
+    background: transparent; border: 1px solid var(--border-2); color: var(--text-dim);
+    width: 32px; height: 32px; border-radius: 8px; cursor: pointer; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .modal .m-close:hover { color: var(--text); border-color: var(--accent-line); }
+  .modal .m-body { padding: 16px 18px 20px; overflow: auto; }
+  .modal .m-cmd { margin-bottom: 16px; }
+  .modal .m-label { color: var(--text-faint); font-size: 12px; margin: 0 0 7px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .modal pre.src {
+    margin: 0;
+    background: var(--inset);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 15px 16px;
+    overflow: auto;
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--text-dim);
+    white-space: pre;
+  }
+
+  ::-webkit-scrollbar { height: 9px; width: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  @media (max-width: 560px) {
+    .nav .hide-sm { display: none; }
+    .hero { padding-top: 44px; }
+    .toolbar { top: 58px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; scroll-behavior: auto !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="./" aria-label="yolo hub home">
+      <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+        <rect width="64" height="64" rx="14" fill="#11161d" stroke="#2d3742"></rect>
+        <path d="M16 21 l11 11 -11 11" fill="none" stroke="#ff8a3d" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path>
+        <rect x="33" y="40" width="17" height="6" rx="3" fill="#ff8a3d"></rect>
+      </svg>
+      <span><b>yolo</b><span class="slash">/</span><span class="hub">hub</span></span>
+    </a>
+    <nav class="nav">
+      <a class="hide-sm" href="https://github.com/rubiojr/yolo/blob/main/docs/05-yolofile.md">Yolofile docs</a>
+      <a class="hide-sm" href="https://github.com/rubiojr/yolo#install">Install yolo</a>
+      <a class="rel" id="release" href="https://github.com/rubiojr/yolo/releases/latest" title="Latest yolo release">
+        <span class="dot"></span><span id="release-tag">release</span>
+      </a>
+      <a class="gh" href="https://github.com/rubiojr/yolo" aria-label="GitHub repository">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <h1><span class="y">yolo</span><span class="s">/</span><span class="h">hub</span></h1>
+    <p class="tag">Grab-and-go dev environments. <span class="linux">🐧 Linux only.</span></p>
+
+    <div class="install">
+      <span class="copyline">
+        <code><span class="d">curl</span> -fsSL https://yolo.rbel.co/install.sh | bash</code>
+        <button class="copybtn" id="install-copy" type="button" aria-label="Copy install command" data-copy="curl -fsSL https://yolo.rbel.co/install.sh | bash">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        </button>
+      </span>
+    </div>
+  </section>
+
+  <section class="toolbar">
+    <div class="search">
+      <span class="pr" aria-hidden="true">❯</span>
+      <label for="q" class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Search environments</label>
+      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="search environments by name, tool or image…" />
+      <span class="kbd" aria-hidden="true">/</span>
+    </div>
+    <div class="count" id="count" aria-live="polite"></div>
+  </section>
+
+  <section id="grid" class="grid" aria-busy="true">
+    <div class="state" style="grid-column:1/-1"><span class="spin"></span><br>loading environments…</div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>Part of <a href="https://github.com/rubiojr/yolo">yolo</a> — fast, per-directory dev VMs.</div>
+    <div class="links">
+      <a href="https://github.com/rubiojr/yolo">Repository</a>
+      <a href="https://github.com/rubiojr/yolo/tree/main/docs">Docs</a>
+      <a href="https://github.com/rubiojr/yolo/blob/main/docs/05-yolofile.md">Yolofile reference</a>
+      <a href="https://yolo.rbel.co/install.sh">install.sh</a>
+    </div>
+  </div>
+</footer>
+
+<div class="modal-bg" id="modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
+  <div class="modal">
+    <div class="m-head">
+      <h3 id="m-title"></h3>
+      <button class="m-close" id="m-close" type="button" aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+      </button>
+    </div>
+    <div class="m-body">
+      <div class="m-cmd">
+        <p class="m-label">run it (ephemeral VM)</p>
+        <div class="cmd-block">
+          <pre><code id="m-cmd-code"></code></pre>
+          <button class="copybtn" id="m-cmd-copy" type="button" aria-label="Copy command">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+        </div>
+      </div>
+      <p class="m-label">Yolofile source</p>
+      <pre class="src" id="m-src"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var HUB_DIR = "hub/";
+  var INDEX_URL = HUB_DIR + "index.json";
+
+  var grid = document.getElementById("grid");
+  var countEl = document.getElementById("count");
+  var input = document.getElementById("q");
+
+  var ENTRIES = [];   // all loaded entries
+  var VISIBLE = [];   // current filtered view
+
+  // ---------- helpers ----------
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  var ACRONYMS = new Set([
+    "tui","cli","api","ui","ux","db","sql","ai","ml","sdk","ide","os","vm","http",
+    "https","css","html","js","ts","json","yaml","toml","cpu","gpu","ssh","tls","io",
+    "npm","php","aws","gcp","k8s","ci","cd","tcp","udp","dns","url","tv","pdf","ascii",
+    "ssg","orm","p2p","irc","xml","csv","rss","gnu","arm","x86"
+  ]);
+  function prettyTitle(slug) {
+    return slug.split(/[-_]+/).filter(Boolean).map(function (w) {
+      var lw = w.toLowerCase();
+      if (ACRONYMS.has(lw)) return lw.toUpperCase();
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    }).join(" ");
+  }
+
+  // Linkify http(s) URLs in plain text, escaping everything safely.
+  function linkify(text) {
+    var re = /https?:\/\/[^\s<>()]+/g;
+    var out = "", last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      out += escapeHtml(text.slice(last, m.index));
+      var url = m[0], tail = "";
+      var t = url.match(/[.,;:!?]+$/);
+      if (t) { tail = t[0]; url = url.slice(0, -tail.length); }
+      out += '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' +
+             escapeHtml(url) + "</a>" + escapeHtml(tail);
+      last = m.index + m[0].length;
+    }
+    out += escapeHtml(text.slice(last));
+    return out;
+  }
+
+  function firstUrl(text) {
+    var m = String(text || "").match(/https?:\/\/[^\s<>()]+/);
+    if (!m) return null;
+    return m[0].replace(/[.,;:!?]+$/, "");
+  }
+
+  // ---------- Yolofile front-matter parser (mirrors docs/05-yolofile.md) ----------
+  function parseFrontMatter(text) {
+    var lines = text.split("\n");
+    if (lines.length === 0 || lines[0].trim() !== "---") {
+      return { meta: {}, body: text };
+    }
+    var end = -1;
+    for (var i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === "---") { end = i; break; }
+    }
+    if (end === -1) return { meta: {}, body: text }; // malformed → treat as body
+    var meta = {};
+    for (var j = 1; j < end; j++) {
+      var line = lines[j], trimmed = line.trim();
+      if (trimmed === "" || trimmed.charAt(0) === "#") continue;
+      var ci = line.indexOf(":");
+      if (ci === -1) continue;
+      var key = line.slice(0, ci).trim().toLowerCase().replace(/-/g, "_");
+      var val = line.slice(ci + 1).trim();
+      if (val.length >= 2) {
+        var a = val.charAt(0), b = val.charAt(val.length - 1);
+        if ((a === '"' && b === '"') || (a === "'" && b === "'")) val = val.slice(1, -1);
+      }
+      meta[key] = val;
+    }
+    if (meta.disk_size === undefined && meta.disk !== undefined) meta.disk_size = meta.disk;
+    if (meta.disk_size === undefined && meta.disk_mb !== undefined) meta.disk_size = meta.disk_mb;
+    return { meta: meta, body: lines.slice(end + 1).join("\n") };
+  }
+
+  // ---------- icons ----------
+  function ic(name) {
+    var p = {
+      image: '<rect x="2.5" y="6" width="13" height="9" rx="1.5"/><path d="M2.5 11l4-3 3 2 3-3 3 3"/>',
+      cpu: '<rect x="5" y="5" width="8" height="8" rx="1"/><path d="M7.5 2.5v2M10.5 2.5v2M7.5 13.5v2M10.5 13.5v2M2.5 7.5h2M2.5 10.5h2M13.5 7.5h2M13.5 10.5h2"/>',
+      mem: '<rect x="2" y="5.5" width="14" height="7" rx="1"/><path d="M5 8v2M8 8v2M11 8v2M13 8v2"/>',
+      disk: '<rect x="2.5" y="4" width="13" height="10" rx="1.5"/><circle cx="11.5" cy="9" r="1.4"/>',
+      backend: '<path d="M9 2l6 3.2v5.6L9 14 3 10.8V5.2z"/><path d="M3 5.2L9 8.4l6-3.2M9 8.4V14"/>',
+      ai: '<path d="M9 2.5l1.6 3.9L14.5 8l-3.9 1.6L9 13.5 7.4 9.6 3.5 8l3.9-1.6z"/>',
+      gui: '<rect x="2.5" y="3.5" width="13" height="8.5" rx="1"/><path d="M6.5 15h5M9 12v3"/>'
+    }[name];
+    return '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + p + "</svg>";
+  }
+
+  // ---------- build a card ----------
+  function chip(icon, text, cls) {
+    return '<span class="chip ' + (cls || "") + '">' + ic(icon) + "<span>" + escapeHtml(text) + "</span></span>";
+  }
+
+  function chipsFor(meta) {
+    var out = [];
+    if (meta.image) out.push(chip("image", meta.image));
+    if (meta.cpus) out.push(chip("cpu", meta.cpus + " vCPU"));
+    if (meta.memory) out.push(chip("mem", meta.memory + " RAM"));
+    if (meta.disk_size) out.push(chip("disk", meta.disk_size + " disk"));
+    if (meta.backend) out.push(chip("backend", meta.backend));
+    var agent = (meta.ai_agent || "").toLowerCase();
+    if (meta.ai_agent && agent !== "none" && agent !== "false" && agent !== "") {
+      out.push(chip("ai", meta.ai_agent === "default" || meta.ai_agent === "true" ? "AI agent" : meta.ai_agent, "accent"));
+    }
+    if (String(meta.gui).toLowerCase() === "true") out.push(chip("gui", "GUI"));
+    if (out.length === 0) out.push(chip("image", "default VM", "muted"));
+    return out.join("");
+  }
+
+  function cmdHtml(cmd) {
+    // colourise: `yolo` prompt-ish + flags
+    var html = escapeHtml(cmd)
+      .replace(/^yolo\b/, '<span class="pr">yolo</span>')
+      .replace(/(\s)(--[a-z-]+)/g, '$1<span class="flag">$2</span>');
+    return html;
+  }
+
+  function cardHtml(e, i) {
+    var desc = e.description
+      ? linkify(e.description)
+      : '<span style="color:var(--text-faint)">A ready-to-run yolo environment.</span>';
+    var srcLink = e.source
+      ? '<a class="src" href="' + escapeHtml(e.source) + '" target="_blank" rel="noopener noreferrer" title="' + escapeHtml(e.source) + '">' +
+        '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>source</a>'
+      : "";
+    return '' +
+      '<article class="card" data-i="' + i + '">' +
+        '<div class="head">' +
+          '<h3><span class="at">~/</span>' + escapeHtml(e.title) + "</h3>" +
+          srcLink +
+        "</div>" +
+        '<p class="desc">' + desc + "</p>" +
+        '<div class="chips">' + chipsFor(e.meta) + "</div>" +
+        '<div class="spacer"></div>' +
+        '<div class="cmd-block">' +
+          "<pre><code>" + cmdHtml(e.cmd) + "</code></pre>" +
+          '<button class="copybtn" type="button" data-act="copy" aria-label="Copy command">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>' +
+          "</button>" +
+        "</div>" +
+        '<div class="actions">' +
+          '<button class="btn primary" type="button" data-act="copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>copy command</button>' +
+          '<button class="btn" type="button" data-act="view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>view Yolofile</button>' +
+        "</div>" +
+      "</article>";
+  }
+
+  // ---------- render ----------
+  function render() {
+    if (VISIBLE.length === 0) {
+      grid.setAttribute("aria-busy", "false");
+      var q = input.value.trim();
+      grid.innerHTML = '<div class="state" style="grid-column:1/-1">' +
+        '<div class="big">∅</div>' +
+        (q ? "no environments match <b>" + escapeHtml(q) + "</b>" : "no environments yet") +
+        "</div>";
+      return;
+    }
+    grid.setAttribute("aria-busy", "false");
+    grid.innerHTML = VISIBLE.map(function (e) { return cardHtml(e, ENTRIES.indexOf(e)); }).join("");
+  }
+
+  function updateCount() {
+    var total = ENTRIES.length, shown = VISIBLE.length;
+    if (total === 0) { countEl.textContent = ""; return; }
+    countEl.innerHTML = shown === total
+      ? "<b>" + total + "</b> environment" + (total === 1 ? "" : "s") + " available"
+      : "<b>" + shown + "</b> of " + total + " shown";
+  }
+
+  function applyFilter() {
+    var q = input.value.trim().toLowerCase();
+    VISIBLE = q === "" ? ENTRIES.slice() : ENTRIES.filter(function (e) { return e.haystack.indexOf(q) !== -1; });
+    render();
+    updateCount();
+  }
+
+  // ---------- clipboard ----------
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, fallbackCopy.bind(null, text));
+    }
+    return Promise.resolve(fallbackCopy(text));
+  }
+  function fallbackCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", "");
+      ta.style.position = "fixed"; ta.style.top = "-1000px";
+      document.body.appendChild(ta); ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  }
+  function flashCopied(btn) {
+    if (!btn) return;
+    var isIcon = btn.classList.contains("copybtn");
+    var prev = btn.innerHTML;
+    btn.classList.add("done");
+    btn.innerHTML = isIcon
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>copied!';
+    setTimeout(function () { btn.classList.remove("done"); btn.innerHTML = prev; }, 1500);
+  }
+
+  // ---------- modal ----------
+  var modal = document.getElementById("modal");
+  var mTitle = document.getElementById("m-title");
+  var mSrc = document.getElementById("m-src");
+  var mCmdCode = document.getElementById("m-cmd-code");
+  var mCmdCopy = document.getElementById("m-cmd-copy");
+  var mClose = document.getElementById("m-close");
+  var lastFocus = null;
+  var modalEntry = null;
+
+  function openModal(e) {
+    modalEntry = e;
+    mTitle.innerHTML = '<span class="at">hub/</span>' + escapeHtml(e.name);
+    mCmdCode.innerHTML = cmdHtml(e.cmd);
+    mSrc.textContent = e.raw;
+    lastFocus = document.activeElement;
+    modal.classList.add("open");
+    document.body.style.overflow = "hidden";
+    mClose.focus();
+  }
+  function closeModal() {
+    modal.classList.remove("open");
+    document.body.style.overflow = "";
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+    modalEntry = null;
+  }
+  mClose.addEventListener("click", closeModal);
+  modal.addEventListener("click", function (ev) { if (ev.target === modal) closeModal(); });
+  mCmdCopy.addEventListener("click", function () {
+    if (modalEntry) copyText(modalEntry.cmd).then(function () { flashCopied(mCmdCopy); });
+  });
+
+  // ---------- events ----------
+  grid.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("[data-act]");
+    if (!btn) return;
+    var card = ev.target.closest(".card");
+    if (!card) return;
+    var e = ENTRIES[+card.getAttribute("data-i")];
+    if (!e) return;
+    if (btn.getAttribute("data-act") === "copy") {
+      copyText(e.cmd).then(function () { flashCopied(btn); });
+    } else if (btn.getAttribute("data-act") === "view") {
+      openModal(e);
+    }
+  });
+
+  input.addEventListener("input", applyFilter);
+
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      if (modal.classList.contains("open")) { closeModal(); return; }
+      if (document.activeElement === input && input.value) { input.value = ""; applyFilter(); }
+    }
+    if (ev.key === "/" && document.activeElement !== input &&
+        !/^(input|textarea|select)$/i.test((document.activeElement || {}).tagName || "")) {
+      ev.preventDefault();
+      input.focus();
+    }
+  });
+
+  document.getElementById("install-copy").addEventListener("click", function () {
+    var btn = this;
+    copyText(btn.getAttribute("data-copy")).then(function () { flashCopied(btn); });
+  });
+
+  // ---------- load ----------
+  function fileUrl(name) { return new URL(HUB_DIR + name + "/Yolofile", document.baseURI).href; }
+
+  // latest yolo release badge (top-right)
+  (function loadRelease() {
+    var rel = document.getElementById("release");
+    var tag = document.getElementById("release-tag");
+    rel.classList.add("loading");
+    fetch("https://api.github.com/repos/rubiojr/yolo/releases/latest", {
+      headers: { "Accept": "application/vnd.github+json" }, cache: "no-cache"
+    })
+      .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
+      .then(function (d) {
+        if (!d || !d.tag_name) throw new Error();
+        rel.classList.remove("loading");
+        tag.textContent = d.tag_name;
+        rel.href = d.html_url || rel.href;
+        rel.title = "Latest yolo release: " + d.tag_name;
+      })
+      .catch(function () {
+        // leave the badge pointing at /releases/latest with a generic label
+        rel.classList.remove("loading");
+        tag.textContent = "releases";
+      });
+  })();
+
+  function buildEntry(name, raw) {
+    var pf = parseFrontMatter(raw);
+    var meta = pf.meta || {};
+    var url = fileUrl(name);
+    var desc = meta.description || "";
+    return {
+      name: name,
+      title: prettyTitle(name),
+      description: desc,
+      source: firstUrl(desc),
+      meta: meta,
+      raw: raw,
+      url: url,
+      cmd: "yolo --yolofile " + url + " --ephemeral",
+      haystack: (name + " " + prettyTitle(name) + " " + desc + " " +
+                 (meta.image || "") + " " + (meta.ai_agent || "") + " " + (meta.backend || "")).toLowerCase()
+    };
+  }
+
+  function showError(msg) {
+    grid.setAttribute("aria-busy", "false");
+    grid.innerHTML = '<div class="state" style="grid-column:1/-1"><div class="big">⚠</div>' +
+      escapeHtml(msg) + "</div>";
+  }
+
+  fetch(INDEX_URL, { cache: "no-cache" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("could not load the hub index (" + r.status + ")");
+      return r.json();
+    })
+    .then(function (names) {
+      if (!Array.isArray(names)) throw new Error("malformed hub index");
+      if (names.length === 0) { ENTRIES = []; VISIBLE = []; render(); updateCount(); return; }
+      return Promise.allSettled(names.map(function (name) {
+        return fetch(fileUrl(name), { cache: "no-cache" }).then(function (r) {
+          if (!r.ok) throw new Error(name);
+          return r.text();
+        }).then(function (txt) { return buildEntry(name, txt); });
+      })).then(function (results) {
+        ENTRIES = results
+          .filter(function (x) { return x.status === "fulfilled"; })
+          .map(function (x) { return x.value; })
+          .sort(function (a, b) { return a.title.localeCompare(b.title); });
+        applyFilter();
+      });
+    })
+    .catch(function (err) {
+      showError((err && err.message) ? err.message : "failed to load environments");
+    });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+---
+image: fedora:44
+cpus: 4
+memory: 4G
+disk-size: 32G
+description: Provision a VM with https://github.com/alsvader/world-cup-tui installed.
+---
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
+    echo 'assumeyes=True' >> /etc/dnf/dnf.conf
+    echo 'install_weak_deps=False' >> /etc/dnf/dnf.conf
+fi
+
+dnf -q install \
+    less \
+    which \
+    ca-certificates \
+    curl-minimal \
+    gzip \
+    tar
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "${tmpdir}"' EXIT
+
+echo "==> [yolofile] installing world-cup-tui latest release"
+version=$(curl -fsSL https://api.github.com/repos/alsvader/world-cup-tui/releases/latest | sed -n 's/.*"tag_name": "v\([^"]*\)".*/\1/p')
+if [ -z "${version}" ]; then
+    echo "==> [yolofile] could not resolve latest world-cup-tui release" >&2
+    exit 1
+fi
+archive="world-cup-tui-${version}-x86_64-unknown-linux-gnu.tar.gz"
+
+cd "${tmpdir}"
+curl -fsSLO "https://github.com/alsvader/world-cup-tui/releases/download/v${version}/${archive}"
+tar xzf "${archive}"
+install -m 0755 world-cup-tui /usr/local/bin/world-cup-tui
+
+echo "==> [yolofile] installed: $(world-cup-tui --version)"
+echo "==> [yolofile] run with: world-cup-tui"

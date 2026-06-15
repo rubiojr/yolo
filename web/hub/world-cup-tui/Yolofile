@@ -1,8 +1,8 @@
 ---
 image: fedora:44
-cpus: 4
-memory: 4G
-disk-size: 32G
+cpus: 1
+memory: 512G
+disk-size: 16G
 description: Provision a VM with https://github.com/alsvader/world-cup-tui installed.
 ---
 #!/usr/bin/env bash

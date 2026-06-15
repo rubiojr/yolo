@@ -109,6 +109,8 @@ All three accept `-n NAME` to target a non-default VM.
 yolo                            Ensure VM, auto-provision (once), shell in.
 yolo -- CMD ARGS...             Run CMD inside the VM.
 yolo --provisioner NAME [...]   Use a specific provisioner (overrides Yolofile).
+yolo --yolofile PATH|URL [...]  Use a Yolofile from a local path or https URL.
+yolo --ephemeral [...]          Use a throwaway VM and empty temp workspace.
 yolo --no-provision [...]       Skip auto-provisioning (alias: --no-provisioner).
 yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode).
                                 Known agents: copilot, opencode.

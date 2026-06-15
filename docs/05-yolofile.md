@@ -76,6 +76,14 @@ directory. If found, it is preferred over the built-in provisioners
 (`fedora-go`, `fedora-rust`, …). Use `--no-provisioner` to skip it for a
 single run; use `--provisioner NAME` to force a specific built-in instead.
 
+Use `--yolofile PATH|URL` to provide a Yolofile from another local path or
+from an `https://` URL. Explicit Yolofiles override `./Yolofile`; `http://`
+URLs are rejected.
+
+For throwaway environments, `--ephemeral --yolofile PATH|URL` provisions the
+Yolofile into an empty temporary workspace and removes the VM/container and
+workspace after the shell or command exits.
+
 ## Front matter
 
 Front matter, when present, **must be the very first thing in the file** —

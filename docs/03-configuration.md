@@ -64,6 +64,17 @@ For per-project configuration that travels with the repo, use a
     (`fedora-go`, `fedora-rust`, `fedora-ruby`, `fedora-android`).
     Overrides a project-local Yolofile.
 
+`--yolofile PATH|URL`
+:   Use a Yolofile from a local path or an `https://` URL instead of
+    `./Yolofile`. Its front matter still applies before VM creation and
+    its body is used as the provisioner.
+
+`--ephemeral`
+:   Use a generated throwaway VM name and an empty temporary host
+    workspace mounted at `/work`. The VM/container and temp directory are
+    removed after the shell or `-- CMD` exits. Works standalone, with
+    `--provisioner NAME`, or with `--yolofile PATH|URL`.
+
 `--no-provision` (alias `--no-provisioner`)
 :   Skip provisioning entirely — pure base image.
 

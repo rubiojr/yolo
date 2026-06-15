@@ -73,8 +73,8 @@ def parse_disk_size(s)
 end
 
 # ---------------- Arg parsing ----------------
-# Parse a flat argv into: subcommand, -n name, --provisioner, --ai-agent,
-# --backend, --gui / --no-gui, rest, -- passthrough.
+# Parse a flat argv into: subcommand, -n name, --provisioner, --yolofile,
+# --ephemeral, --ai-agent, --backend, --gui / --no-gui, rest, -- passthrough.
 #
 # `ai_agents` is the yolo-side AI_AGENTS hash, used only for the
 # `--ai-agent` optional-value heuristic (if the next arg matches a known
@@ -103,6 +103,8 @@ def parse_args(args, ai_agents, default_ai_agent, version)
   backend = ""
   gui = false
   gui_set = false
+  yolofile_path = ""
+  ephemeral = false
   i = 0
   while i < len(args)
     a = args[i]
@@ -116,6 +118,15 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     elsif a == "--provisioner" || a == "-P"
       i = i + 1
       prov = args[i]
+    elsif a == "--yolofile"
+      i = i + 1
+      if i >= len(args)
+        _err("--yolofile requires a path or https:// URL")
+        os.exit(2)
+      end
+      yolofile_path = args[i]
+    elsif a == "--ephemeral"
+      ephemeral = true
     elsif a == "--no-provision" || a == "--no-provisioner"
       no_prov = true
     elsif a == "-o" || a == "--output"
@@ -184,14 +195,14 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     end
     i = i + 1
   end
-  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set)
+  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral)
 end
 
 # Build the parsed-args hash. Factored out only because parse_args has two
 # return points (the -h sentinel path and the normal end-of-loop path) and
 # duplicating the 15-field literal twice is asking for drift.
-def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set)
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set}
+def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral)
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral}
 end
 
 # ---------------- Help / version ----------------
@@ -206,6 +217,8 @@ def print_help(default_ai_agent)
   puts "  yolo                            Ensure VM, auto-provision (once), shell in."
   puts "  yolo -- CMD ARGS...             Run CMD inside the VM."
   puts "  yolo --provisioner NAME [...]   Use a specific provisioner (overrides Yolofile)."
+  puts "  yolo --yolofile PATH|URL [...]  Use a Yolofile from a local path or https URL."
+  puts "  yolo --ephemeral [...]          Use a throwaway VM and empty temp workspace."
   puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
   puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: #{default_ai_agent})."
   puts "                                  Known agents: copilot, opencode."

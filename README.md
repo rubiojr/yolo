@@ -33,6 +33,8 @@ go version go1.26.3 linux/amd64
   matching built-in provisioner. Project-specific tooling lives in an
   optional [`Yolofile`](./docs/05-yolofile.md).
 - **Named VMs.** Run several persistent VMs side-by-side with `-n NAME`.
+- **Throwaway VMs.** `--ephemeral` creates a temporary VM with an empty
+  `/work`, optionally provisioned by `--provisioner` or `--yolofile PATH|URL`.
 - **Your code is mounted live.** `$PWD` shows up inside the guest as
   `/work` (read-write), so edits on either side are immediately
   visible on the other.

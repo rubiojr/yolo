@@ -88,6 +88,10 @@ def exists
   return os.file_exists(path())
 end
 
+def exists_at(p)
+  return os.file_exists(p)
+end
+
 # ---------------- Front matter parsing ----------------
 # Strip optional surrounding double or single quotes from a value. Used when
 # parsing values like `image: "fedora:44"`.

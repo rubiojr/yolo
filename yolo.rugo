@@ -25,6 +25,8 @@ use "color"
 use "crypto"
 use "fmt"
 use "filepath"
+use "conv"
+use "time"
 
 # ---------------- Backends ----------------
 # Each backend lives at `backends/<name>.rugo` and exposes a `make()` factory
@@ -133,6 +135,20 @@ backend_sel = BACKEND_ENV
 # SUPPORTS_GUI is true; refused at the CLI layer otherwise.
 gui_enabled = false
 
+# Host directory mounted at WORKSPACE. Normal runs mount the invoking cwd;
+# --ephemeral replaces this with a fresh temporary directory.
+host_workspace = os.cwd()
+
+# Optional explicit Yolofile source, set by --yolofile. May be a local path or
+# an https:// URL; resolved once in main before provisioning/resource parsing.
+yolofile_override = ""
+yolofile_override_display = ""
+yolofile_override_content = ""
+
+# Ephemeral runs use generated state names and are removed when attach exits.
+ephemeral_mode = false
+ephemeral_workspace = ""
+
 mkdir -p "#{STATE_DIR}"
 
 # ---------------- Logging ----------------
@@ -238,6 +254,89 @@ def shell_join(args)
   return str.join(parts, " ")
 end
 
+def safe_ephemeral_name
+  seed = "#{os.cwd()}:#{os.pid()}:#{time.now()}"
+  h = crypto.sha1(seed)
+  return "tmp-" + str.slice(h, 0, 12)
+end
+
+def make_temp_workspace
+  base = os.tmp_dir()
+  seed = "#{os.pid()}-#{str.slice(crypto.sha1(os.cwd() + conv.to_s(time.now())), 0, 8)}"
+  p = filepath.join(base, "yolo-ephemeral-#{seed}")
+  made = try `bash -c "mkdir -p #{shell_quote(p)} && echo OK"` or ""
+  if str.trim(made) != "OK"
+    err_("failed to create ephemeral workspace at #{p}")
+    os.exit(1)
+  end
+  return p
+end
+
+def cleanup_ephemeral(name)
+  if ephemeral_mode != true
+    return
+  end
+  log("cleaning up ephemeral VM #{color.bold(name)}")
+  cmd_rm(name)
+  if ephemeral_workspace != ""
+    try `bash -c "rm -rf #{shell_quote(ephemeral_workspace)}"` or nil
+  end
+end
+
+def release_and_exit(name, code)
+  release_lock(name)
+  cleanup_ephemeral(name)
+  os.exit(code)
+end
+
+def read_yolofile_source(src)
+  if src == ""
+    return {display: "", content: "", err: ""}
+  end
+  if str.starts_with(src, "http://")
+    return {display: src, content: "", err: "Yolofile URLs must use https://"}
+  end
+  if str.starts_with(src, "https://")
+    cmd = "curl -fsSL --proto '=https' --tlsv1.2 " + shell_quote(src)
+    body = try os.exec(cmd) or msg
+        return {display: src, content: "", err: "failed to fetch #{src}: #{msg}"}
+      end
+    return {display: src, content: body, err: ""}
+  end
+  p = src
+  if !str.starts_with(p, "/")
+    p = filepath.join(os.cwd(), p)
+  end
+  if !yolofile.exists_at(p)
+    return {display: p, content: "", err: "Yolofile not found: #{p}"}
+  end
+  return {display: p, content: os.read_file(p), err: ""}
+end
+
+def active_yolofile_exists
+  if yolofile_override != ""
+    return true
+  end
+  if ephemeral_mode == true
+    return false
+  end
+  return yolofile.exists()
+end
+
+def active_yolofile_display
+  if yolofile_override != ""
+    return yolofile_override_display
+  end
+  return yolofile.path()
+end
+
+def parse_active_yolofile
+  if yolofile_override != ""
+    return yolofile.parse_content(yolofile_override_content)
+  end
+  return yolofile.read_and_parse()
+end
+
 # Start a fresh VM bound to $name. Returns the new vm-id.
 def start_vm(name)
   be = backend_for(name)
@@ -257,7 +356,7 @@ def start_vm(name)
   if img == ""
     img = be.DEFAULT_IMAGE
   end
-  log("starting #{color.bold(img)} VM #{color.bold(name)} for #{os.cwd()} [#{be.NAME}]")
+  log("starting #{color.bold(img)} VM #{color.bold(name)} for #{host_workspace} [#{be.NAME}]")
   opts = {
     "name"      => name,
     "image"     => img,
@@ -265,7 +364,7 @@ def start_vm(name)
     "mem_mb"    => mem_mb,
     "disk_mb"   => disk_mb,
     "workspace" => WORKSPACE,
-    "cwd"       => os.cwd(),
+    "cwd"       => host_workspace,
     "user"      => USER_FLAG,
     "allow"     => ALLOW,
     "gui"       => gui_enabled
@@ -368,7 +467,7 @@ def read_cwd(name)
 end
 
 def record_cwd(name)
-  os.write_file(cwd_file(name), os.cwd())
+  os.write_file(cwd_file(name), host_workspace)
 end
 
 def read_state(name)
@@ -867,13 +966,23 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
     resolved = resolve_provisioner(prov_name)
     pname = resolved.name
     if pname == ""
-      log("no provisioner detected for #{os.cwd()} — skipping (use --provisioner NAME or add a Yolofile)")
+      if ephemeral_mode == true
+        log("ephemeral run has no provisioner — skipping (use --provisioner NAME or --yolofile PATH|URL)")
+      else
+        log("no provisioner detected for #{os.cwd()} — skipping (use --provisioner NAME or add a Yolofile)")
+      end
     elsif resolved.src == ""
       err_("unknown provisioner '#{prov_name}'")
-      release_lock(name)
-      os.exit(1)
+      release_and_exit(name, 1)
     elsif !is_applied(name, id, resolved.marker)
-      apply_provisioner(name, id, prov_name)
+      if ephemeral_mode == true
+        try apply_provisioner(name, id, prov_name) or err
+          err_(err)
+          release_and_exit(name, 1)
+        end
+      else
+        apply_provisioner(name, id, prov_name)
+      end
       mark_applied(name, id, resolved.marker)
     end
   end
@@ -883,13 +992,19 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
     agent_src = AI_AGENTS[agent_name]
     if agent_src == nil
       err_("unknown ai-agent '#{agent_name}'")
-      release_lock(name)
-      os.exit(1)
+      release_and_exit(name, 1)
     end
     agent_short = str.slice(crypto.sha256(agent_src), 0, 12)
     agent_marker = "ai-agent:#{agent_name}:#{agent_short}"
     if !is_applied(name, id, agent_marker)
-      apply_agent(id, agent_name, name)
+      if ephemeral_mode == true
+        try apply_agent(id, agent_name, name) or err
+          err_(err)
+          release_and_exit(name, 1)
+        end
+      else
+        apply_agent(id, agent_name, name)
+      end
       mark_applied(name, id, agent_marker)
     end
   end
@@ -914,11 +1029,35 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
     it_flag = "-it"
   end
 
-  if len(passthrough) == 0
-    be.exec_shell(id, WORKSPACE, it_flag)
+  if ephemeral_mode == true
+    exec_ok = true
+    exec_err = ""
+    if len(passthrough) == 0
+      try be.exec_shell(id, WORKSPACE, it_flag) or err
+        exec_ok = false
+        exec_err = err
+      end
+    else
+      argv = shell_join(passthrough)
+      try be.exec_argv(id, WORKSPACE, it_flag, argv) or err
+        exec_ok = false
+        exec_err = err
+      end
+    end
+    cleanup_ephemeral(name)
+    if exec_ok != true
+      if exec_err != ""
+        err_(exec_err)
+      end
+      os.exit(1)
+    end
   else
-    argv = shell_join(passthrough)
-    be.exec_argv(id, WORKSPACE, it_flag, argv)
+    if len(passthrough) == 0
+      be.exec_shell(id, WORKSPACE, it_flag)
+    else
+      argv = shell_join(passthrough)
+      be.exec_argv(id, WORKSPACE, it_flag, argv)
+    end
   end
 end
 
@@ -926,11 +1065,15 @@ end
 def cmd_provisioners
   auto = ""
   default_label = ""
-  if yolofile.exists()
-    yp = yolofile.path()
+  if active_yolofile_exists()
+    yp = active_yolofile_display()
     default_label = "Yolofile (#{yp})"
   else
-    auto = detect_provisioner()
+    if ephemeral_mode == true
+      auto = ""
+    else
+      auto = detect_provisioner()
+    end
     cwd = os.cwd()
     if auto == ""
       default_label = "(none — no Yolofile, no language signals in #{cwd})"
@@ -941,14 +1084,14 @@ def cmd_provisioners
   puts "Available provisioners (default: #{default_label}):"
   for n in PROVISIONERS
     marker = "  "
-    if !yolofile.exists() && n == auto
+    if !active_yolofile_exists() && n == auto
       marker = color.green("* ")
     end
     puts "#{marker}#{n}"
   end
-  if yolofile.exists()
+  if active_yolofile_exists()
     star = color.green("* ")
-    yp = yolofile.path()
+    yp = active_yolofile_display()
     puts "#{star}yolofile  (#{yp})"
   end
   puts ""
@@ -1029,8 +1172,10 @@ end
 def resolve_provisioner(prov_name)
   pname = prov_name
   if pname == ""
-    if yolofile.exists()
+    if active_yolofile_exists()
       pname = "__yolofile__"
+    elsif ephemeral_mode == true
+      pname = ""
     else
       pname = detect_provisioner()
     end
@@ -1042,13 +1187,16 @@ def resolve_provisioner(prov_name)
   src = ""
   display = pname
   if pname == "__yolofile__"
-    parsed = yolofile.read_and_parse()
+    parsed = parse_active_yolofile()
     if parsed.err != ""
       err_("Yolofile: #{parsed.err}")
       os.exit(2)
     end
     src = parsed.body
     display = "Yolofile"
+    if yolofile_override != ""
+      display = "Yolofile (#{yolofile_override_display})"
+    end
   else
     src = PROVISIONERS[pname]
     if src == nil
@@ -1086,8 +1234,8 @@ def apply_provisioner(name, vm_id, prov_name)
     for n in PROVISIONERS
       puts "  #{n}"
     end
-    if yolofile.exists()
-      puts "  yolofile (#{yolofile.path()})"
+    if active_yolofile_exists()
+      puts "  yolofile (#{active_yolofile_display()})"
     end
     os.exit(1)
   end
@@ -1531,15 +1679,33 @@ end
 
 # ---------------- Main ----------------
 parsed = cli.parse_args(os.args(), AI_AGENTS, DEFAULT_AI_AGENT, VERSION)
+sub = parsed.sub
+
+if parsed.ephemeral && sub != ""
+  err_("--ephemeral only works with attach/run mode, not subcommand '#{sub}'")
+  os.exit(2)
+end
+if parsed.yolofile_path != ""
+  ysrc = read_yolofile_source(parsed.yolofile_path)
+  if ysrc.err != ""
+    err_(ysrc.err)
+    os.exit(2)
+  end
+  yolofile_override = parsed.yolofile_path
+  yolofile_override_display = ysrc.display
+  yolofile_override_content = ysrc.content
+end
+if parsed.ephemeral
+  ephemeral_mode = true
+end
 
 # Yolofile front matter: applied only for subcommands that may create or
 # recreate a VM. This is deliberate — a malformed Yolofile must not block
 # `yolo rm`, `yolo stop`, `yolo logs`, etc., which need to operate on
 # already-existing VM state regardless of the (possibly broken) file.
-sub = parsed.sub
 applies_resources = (sub == "" || sub == "provision" || sub == "export")
-if applies_resources && yolofile.exists()
-  yf_parsed = yolofile.read_and_parse()
+if applies_resources && active_yolofile_exists()
+  yf_parsed = parse_active_yolofile()
   if yf_parsed.err != ""
     err_("Yolofile: #{yf_parsed.err}")
     os.exit(2)
@@ -1589,7 +1755,15 @@ if backend_sel != "" && BACKENDS[backend_sel] == nil
 end
 
 name = parsed.name
-if name == ""
+if parsed.ephemeral
+  if name != ""
+    err_("--ephemeral uses an auto-generated throwaway name; do not combine it with -n/--name")
+    os.exit(2)
+  end
+  name = safe_ephemeral_name()
+  ephemeral_workspace = make_temp_workspace()
+  host_workspace = ephemeral_workspace
+elsif name == ""
   name = default_name()
 end
 if sub == "ls"
@@ -1624,4 +1798,3 @@ elsif sub == "import"
 else
   cmd_attach(name, parsed.passthrough, parsed.prov, parsed.no_prov, parsed.agent)
 end
-

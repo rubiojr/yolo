@@ -64,7 +64,8 @@ format.
 A Yolofile has two parts, in order:
 
 1. **Front matter** *(optional)* — a YAML-ish block of VM-creation overrides
-   wrapped between two `---` delimiter lines.
+   (plus optional metadata such as `description`) wrapped between two `---`
+   delimiter lines.
 2. **Body** — a plain `bash` script, run as `root` inside the guest microVM
    via `matchlock exec -i -- bash` the first time you attach (and again
    whenever the body changes — see [Re-provisioning](#re-provisioning)).
@@ -127,6 +128,7 @@ a single `key: value` pair.
 | `backend`                                | string  | `matchlock`  | `matchlock`, `podman`                   |
 | `gui`                                    | bool    | `false`      | `true`, `false`                         |
 | `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
+| `description`                            | string  | *(unset)*    | `Dev VM for the billing API`            |
 
 Unknown keys produce a warning (`Yolofile: ignoring unknown front matter
 key '...'`) but do not stop the run, so you can add a comment-like key
@@ -202,6 +204,30 @@ the front-matter value, which in turn wins over the unset default of "no
 agent". The agent layer is tracked under its own re-provisioning marker
 (`ai-agent:NAME`), so swapping it in/out via front matter triggers exactly
 the agent install, not a full re-provision of the language stack.
+
+#### `description`
+
+A free-form, human-readable note describing what the Yolofile sets up.
+
+It is **purely documentation**: `yolo` accepts the key (so it does not emit
+the unknown-key warning) but never reads, validates, or displays the value,
+and it has no effect on the VM. Use it to annotate the file for whoever
+reads it next:
+
+```bash
+---
+image: fedora:44
+description: Build + test VM for the billing API (Go 1.23, postgres client)
+---
+#!/usr/bin/env bash
+set -euo pipefail
+dnf -q install go postgresql
+```
+
+Because the value never reaches a shell or the terminal, there is no
+character allowlist or length limit (unlike `image`). It does, however,
+share the one-line front-matter constraint: the value is everything after
+the first `:` on a single line — multi-line descriptions are not supported.
 
 ## Body
 

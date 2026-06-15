@@ -3,7 +3,8 @@
 # A Yolofile is a plain bash script (run as root inside the guest) that
 # yolo may use as the per-CWD provisioner. It can optionally start with a
 # YAML-ish front matter block declaring VM-creation overrides (image,
-# cpus, memory, disk-size, backend, gui, ai-agent). See docs/05-yolofile.md.
+# cpus, memory, disk-size, backend, gui, ai-agent) plus an optional free-form
+# `description` for documentation. See docs/05-yolofile.md.
 #
 # This module owns:
 #   - locating the Yolofile (path / exists)
@@ -218,7 +219,12 @@ end
 # message and exits the process (same hard-fail semantics as the original).
 def validate(fm, backends, ai_agents, default_ai_agent)
   out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false}
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true}
+  # `description` is accepted as free-form, self-documenting metadata. yolo
+  # never reads, validates, or displays it — it exists so authors can annotate
+  # a Yolofile without tripping the unknown-key warning below. It lives in
+  # `known` only (intentionally absent from `out`): there is no behaviour
+  # attached to it.
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "description" => true}
   for k in fm
     if known[k] != true
       _warn("Yolofile: ignoring unknown front matter key '#{k}'")

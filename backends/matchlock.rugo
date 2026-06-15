@@ -321,6 +321,7 @@ def make
   be = {}
   be["NAME"]             = "matchlock"
   be["SUPPORTS_GUI"]     = false
+  be["SUPPORTS_AUDIO"]   = false
   be["SUPPORTS_EXPORT"]  = true
   be["PERSISTS_ON_STOP"] = false
   be["DEFAULT_IMAGE"]    = "fedora:44"

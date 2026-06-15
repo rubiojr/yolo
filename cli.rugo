@@ -103,6 +103,8 @@ def parse_args(args, ai_agents, default_ai_agent, version)
   backend = ""
   gui = false
   gui_set = false
+  audio = false
+  audio_set = false
   yolofile_path = ""
   ephemeral = false
   i = 0
@@ -147,6 +149,12 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     elsif a == "--no-gui"
       gui = false
       gui_set = true
+    elsif a == "--audio"
+      audio = true
+      audio_set = true
+    elsif a == "--no-audio"
+      audio = false
+      audio_set = true
     elsif a == "--disk-size"
       i = i + 1
       if i >= len(args)
@@ -195,14 +203,14 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     end
     i = i + 1
   end
-  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral)
+  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set)
 end
 
 # Build the parsed-args hash. Factored out only because parse_args has two
 # return points (the -h sentinel path and the normal end-of-loop path) and
 # duplicating the 15-field literal twice is asking for drift.
-def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral)
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral}
+def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set)
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set}
 end
 
 # ---------------- Help / version ----------------
@@ -229,6 +237,9 @@ def print_help(default_ai_agent)
   puts "  yolo --gui [...]                Bind-mount the host Wayland socket into the"
   puts "                                  guest so graphical apps render on your"
   puts "                                  compositor. Requires --backend podman."
+  puts "  yolo --audio [...]              Bind-mount the host PipeWire/PulseAudio"
+  puts "                                  socket into the guest so apps can play"
+  puts "                                  sound. Requires --backend podman."
   puts "  yolo -n NAME [...]              Use a named VM."
   puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."
   puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
@@ -270,7 +281,7 @@ def print_help(default_ai_agent)
   puts "  automatically re-provisions (content-hashed for the marker)."
   puts "  May begin with a YAML-style '---' front matter block declaring"
   puts "  VM-creation overrides (image, cpus, memory, disk-size, backend,"
-  puts "  gui). See docs/05-yolofile.md for the full format."
+  puts "  gui, audio). See docs/05-yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image (default depends on backend)"

@@ -819,7 +819,7 @@
   });
 
   // ---------- load ----------
-  function fileUrl(name) { return new URL(HUB_DIR + name + "/Yolofile", document.baseURI).href; }
+  function fileUrl(name) { return new URL(HUB_DIR + name + "/Yolofile", document.baseURI).href.replace(/^http:\/\//, "https://"); }
 
   // latest yolo release badge (top-right)
   (function loadRelease() {

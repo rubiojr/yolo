@@ -218,13 +218,13 @@ end
 # Returns a hash of resolved overrides; on validation failure, prints a
 # message and exits the process (same hard-fail semantics as the original).
 def validate(fm, backends, ai_agents, default_ai_agent)
-  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false}
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false, audio: false, audio_set: false}
   # `description` is accepted as free-form, self-documenting metadata. yolo
   # never reads, validates, or displays it — it exists so authors can annotate
   # a Yolofile without tripping the unknown-key warning below. It lives in
   # `known` only (intentionally absent from `out`): there is no behaviour
   # attached to it.
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "description" => true}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "audio" => true, "description" => true}
   for k in fm
     if known[k] != true
       _warn("Yolofile: ignoring unknown front matter key '#{k}'")
@@ -299,6 +299,20 @@ def validate(fm, backends, ai_agents, default_ai_agent)
       out.gui_set = true
     else
       _err("Yolofile: invalid 'gui' value: '#{v_gui}' (expected true/false)")
+      os.exit(2)
+    end
+  end
+  v_audio = fm["audio"]
+  if v_audio != nil && v_audio != ""
+    lv = str.lower(v_audio)
+    if lv == "true" || lv == "yes" || lv == "1" || lv == "on"
+      out.audio = true
+      out.audio_set = true
+    elsif lv == "false" || lv == "no" || lv == "0" || lv == "off"
+      out.audio = false
+      out.audio_set = true
+    else
+      _err("Yolofile: invalid 'audio' value: '#{v_audio}' (expected true/false)")
       os.exit(2)
     end
   end

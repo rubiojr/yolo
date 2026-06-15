@@ -91,6 +91,7 @@ def _start_impl(opts)
   ws        = opts["workspace"]
   cwd       = opts["cwd"]
   gui       = opts["gui"]
+  audio     = opts["audio"]
 
   # Remove a stale container with the same name. Idempotent — `podman rm`
   # exits 1 if the name doesn't exist, which we swallow.
@@ -110,6 +111,11 @@ def _start_impl(opts)
     gui_args = _build_gui_args()
   end
 
+  audio_args = ""
+  if audio == true
+    audio_args = _build_audio_args()
+  end
+
   # Hostname inside the container. Podman defaults to the container id;
   # set it to the binding name for prettier prompts (mirrors matchlock).
   cmd = "podman run -d --name " + _sh_squote(cname) + " " +
@@ -118,6 +124,7 @@ def _start_impl(opts)
         "-w " + _sh_squote(ws) + " " +
         user_arg + " " +
         gui_args + " " +
+        audio_args + " " +
         _sh_squote(img) + " " +
         "sleep infinity"
 
@@ -198,7 +205,49 @@ def _build_gui_args
   return args
 end
 
-# ---------------- stop / resume / remove ----------------
+# Build the bind-mounts and env vars needed for audio passthrough. We mount
+# the host's PipeWire and/or PulseAudio user sockets (whichever exist) at the
+# same path inside the container, so clients that build the path from
+# $XDG_RUNTIME_DIR find them. This covers the common cases: a PipeWire session
+# (with or without its pulse-compat socket) and a classic PulseAudio session.
+#
+# Guest apps that speak ALSA (rather than Pulse/PipeWire directly) still need
+# an ALSA->Pulse/PipeWire bridge package inside the image (e.g.
+# `alsa-plugins-pulseaudio` or `pipewire-alsa`) plus a default-to-pulse
+# /etc/asound.conf. That's the Yolofile/image's job, not ours — see
+# docs/09-backends.md.
+def _build_audio_args
+  xdg = os.getenv("XDG_RUNTIME_DIR")
+  if xdg == ""
+    _err("--audio requires XDG_RUNTIME_DIR to be set (no user runtime dir found)")
+    os.exit(2)
+  end
+  args = ""
+  found = false
+  # PipeWire native socket.
+  pw = filepath.join(xdg, "pipewire-0")
+  if os.file_exists(pw)
+    args = args + "-v " + _sh_squote(pw + ":" + pw) + " "
+    found = true
+  end
+  # PulseAudio (or pipewire-pulse) native socket. Set PULSE_SERVER so plain
+  # PulseAudio clients connect without further configuration.
+  pulse = filepath.join(xdg, "pulse/native")
+  if os.file_exists(pulse)
+    args = args + "-v " + _sh_squote(pulse + ":" + pulse) + " " +
+           "-e " + _sh_squote("PULSE_SERVER=unix:" + pulse) + " "
+    found = true
+  end
+  if !found
+    _err("--audio: no PipeWire or PulseAudio socket found under #{xdg}")
+    _err("(looked for pipewire-0 and pulse/native — is a sound server running?)")
+    os.exit(2)
+  end
+  # Apps locate the sockets via $XDG_RUNTIME_DIR; make sure it's set in the
+  # guest. Harmless if --gui already set the same value.
+  args = args + "-e " + _sh_squote("XDG_RUNTIME_DIR=" + xdg) + " "
+  return args
+end
 def _stop_impl(id)
   if id == "" || id == nil
     return
@@ -367,6 +416,7 @@ def make
   be = {}
   be["NAME"]             = "podman"
   be["SUPPORTS_GUI"]     = true
+  be["SUPPORTS_AUDIO"]   = true
   be["SUPPORTS_EXPORT"]  = false
   be["PERSISTS_ON_STOP"] = true
   be["DEFAULT_IMAGE"]    = "registry.fedoraproject.org/fedora-toolbox:44"

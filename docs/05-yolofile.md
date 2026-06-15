@@ -127,6 +127,7 @@ a single `key: value` pair.
 | `disk-size` *(aliases: `disk`, `disk_mb`)* | size    | `32768` (MiB)| `64G`, `100g`, `32768`                  |
 | `backend`                                | string  | `matchlock`  | `matchlock`, `podman`                   |
 | `gui`                                    | bool    | `false`      | `true`, `false`                         |
+| `audio`                                  | bool    | `false`      | `true`, `false`                         |
 | `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
 | `description`                            | string  | *(unset)*    | `Dev VM for the billing API`            |
 
@@ -152,6 +153,16 @@ Boolean. When `true` and `backend` is `podman`, the container is created
 with the host's Wayland socket bind-mounted so graphical apps render on
 the host compositor. Has no effect when `backend` is `matchlock`
 (matchlock would refuse the invocation; see `--gui` in `yolo --help`).
+
+#### `audio`
+
+Boolean. When `true` and `backend` is `podman`, the container is created
+with the host's PipeWire/PulseAudio socket(s) bind-mounted so apps can
+play sound. Independent of `gui` — a terminal app can use `audio: true`
+without `gui`. Has no effect when `backend` is `matchlock` (it would
+refuse the invocation; see `--audio` in `yolo --help`). Apps that use
+ALSA directly need an ALSA→Pulse bridge in the image; see
+[Backends](./09-backends.md#audio-passthrough---audio).
 
 #### `image`
 

@@ -1,0 +1,70 @@
+---
+image: fedora:44
+cpus: 1 
+memory: 1G
+disk-size: 16G
+description: Provision a VM with https://github.com/bjarneo/cliamp installed.
+backend: podman
+audio: true
+---
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
+    echo 'assumeyes=True' >> /etc/dnf/dnf.conf
+    echo 'install_weak_deps=False' >> /etc/dnf/dnf.conf
+fi
+
+# Runtime deps: alsa-lib for the audio backend, ffmpeg + yt-dlp for extra
+# formats/providers (AAC/Opus/WMA, YouTube, SoundCloud, etc.).
+# alsa-plugins-pulseaudio bridges ALSA -> PipeWire/PulseAudio so audio works
+# under `yolo --backend podman --audio`.
+dnf -q install \
+    less \
+    which \
+    ca-certificates \
+    curl-minimal \
+    alsa-lib \
+    alsa-plugins-pulseaudio \
+    ffmpeg-free \
+    yt-dlp
+
+# Route ALSA through the host sound server when `--audio` mounts its socket.
+if [ ! -f /etc/asound.conf ]; then
+    printf 'pcm.!default pulse\nctl.!default pulse\n' > /etc/asound.conf
+fi
+
+arch=$(uname -m)
+case "${arch}" in
+    x86_64|amd64) asset="cliamp-linux-amd64" ;;
+    aarch64|arm64) asset="cliamp-linux-arm64" ;;
+    *) echo "==> [yolofile] unsupported architecture: ${arch}" >&2; exit 1 ;;
+esac
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "${tmpdir}"' EXIT
+cd "${tmpdir}"
+
+echo "==> [yolofile] installing cliamp latest release (${asset})"
+curl -fsSLo cliamp "https://github.com/bjarneo/cliamp/releases/latest/download/${asset}"
+
+# Verify checksum against the release checksums.txt.
+if curl -fsSLo checksums.txt "https://github.com/bjarneo/cliamp/releases/latest/download/checksums.txt"; then
+    expected=$(sed -n "s/^\([0-9a-f]\{64\}\)  ${asset}$/\1/p" checksums.txt)
+    if [ -n "${expected}" ]; then
+        actual=$(sha256sum cliamp | awk '{print $1}')
+        if [ "${expected}" != "${actual}" ]; then
+            echo "==> [yolofile] checksum mismatch for ${asset}" >&2
+            echo "    expected: ${expected}" >&2
+            echo "    got:      ${actual}" >&2
+            exit 1
+        fi
+        echo "==> [yolofile] checksum verified"
+    fi
+fi
+
+install -m 0755 cliamp /usr/local/bin/cliamp
+
+echo "==> [yolofile] installed: $(cliamp --version 2>/dev/null || echo cliamp)"
+echo "==> [yolofile] run with: cliamp ~/Music"

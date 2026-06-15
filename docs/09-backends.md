@@ -15,6 +15,7 @@ For the internal contract that every backend must implement, see
 | Boot time (post first pull)         | ~1–2 s           | <1 s                          |
 | In-guest state across `yolo stop`   | **Not preserved** (recreate on next attach) | **Preserved** (resume on next attach) |
 | GUI apps (Wayland)                  | No               | Yes (`--gui`)                 |
+| Audio (PipeWire/PulseAudio)         | No               | Yes (`--audio`)               |
 | `yolo export` / `yolo import`       | Yes              | No                            |
 | Egress allow-list (`YOLO_ALLOW`)    | Yes (MITM proxy) | Ignored                       |
 | Disk size cap (`YOLO_DISK_MB`)      | Yes              | Ignored (uses host fs)        |
@@ -86,6 +87,47 @@ set -euo pipefail
 dnf install -y gnome-text-editor
 YML
 yolo -- gnome-text-editor
+```
+
+## Audio passthrough (`--audio`)
+
+Audio passthrough is podman-only (matchlock refuses it). When enabled it:
+
+- Bind-mounts the host **PipeWire** socket (`$XDG_RUNTIME_DIR/pipewire-0`)
+  into the container at the same path, if present.
+- Bind-mounts the host **PulseAudio** / pipewire-pulse socket
+  (`$XDG_RUNTIME_DIR/pulse/native`) if present, and sets `PULSE_SERVER` so
+  PulseAudio clients connect with no extra config.
+- Sets `XDG_RUNTIME_DIR` in the container so clients locate the sockets.
+
+At least one of the two sockets must exist on the host, otherwise the
+invocation fails. It is independent of `--gui`: a terminal app (e.g. a TUI
+music player) can take `--audio` without `--gui`.
+
+> **ALSA apps:** programs that talk to ALSA directly (rather than
+> Pulse/PipeWire) need an ALSA→Pulse bridge **inside the image**. Install
+> `alsa-plugins-pulseaudio` (or `pipewire-alsa`) and point ALSA at pulse:
+>
+> ```
+> printf 'pcm.!default pulse\nctl.!default pulse\n' > /etc/asound.conf
+> ```
+
+### Quick start
+
+```
+mkdir ~/audio && cd ~/audio
+cat > Yolofile <<'YML'
+---
+backend: podman
+audio: true
+image: fedora:44
+---
+#!/usr/bin/env bash
+set -euo pipefail
+dnf install -y alsa-plugins-pulseaudio mpg123
+printf 'pcm.!default pulse\nctl.!default pulse\n' > /etc/asound.conf
+YML
+yolo -- mpg123 some-file.mp3
 ```
 
 ## Stop/start semantics

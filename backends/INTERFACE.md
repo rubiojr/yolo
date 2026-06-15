@@ -21,6 +21,7 @@ via dot-access: `be = matchlock.make(); be.start(opts)`.
 | -------------------- | ------ | -------- | --------------------------------------------------------------------- |
 | `NAME`               | string | yes      | `"matchlock"`, `"podman"`, …                                          |
 | `SUPPORTS_GUI`       | bool   | yes      | true when the backend wires up a display server into the guest        |
+| `SUPPORTS_AUDIO`     | bool   | yes      | true when the backend wires the host sound server into the guest      |
 | `SUPPORTS_EXPORT`    | bool   | yes      | true when `export_archive` / `import_archive` are implemented         |
 | `PERSISTS_ON_STOP`   | bool   | yes      | true when `stop()` preserves in-guest state across the next `start()` |
 | `DEFAULT_IMAGE`      | string | yes      | OCI ref used when no per-VM image is configured                       |
@@ -53,6 +54,9 @@ be.logs(id, extra)              -> ()          # streams VM/container log to the
 - `gui`        — bool; when true, backend must wire a display server. Only
                  honoured when `SUPPORTS_GUI` is true; yolo refuses earlier
                  otherwise.
+- `audio`      — bool; when true, backend must wire the host sound server
+                 (PipeWire/PulseAudio) into the guest. Only honoured when
+                 `SUPPORTS_AUDIO` is true; yolo refuses earlier otherwise.
 
 ## Exec channels
 

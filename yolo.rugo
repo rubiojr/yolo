@@ -135,6 +135,10 @@ backend_sel = BACKEND_ENV
 # SUPPORTS_GUI is true; refused at the CLI layer otherwise.
 gui_enabled = false
 
+# Audio passthrough requested for this invocation. Honoured by backends
+# where SUPPORTS_AUDIO is true; refused at the CLI layer otherwise.
+audio_enabled = false
+
 # Host directory mounted at WORKSPACE. Normal runs mount the invoking cwd;
 # --ephemeral replaces this with a fresh temporary directory.
 host_workspace = os.cwd()
@@ -345,6 +349,10 @@ def start_vm(name)
     err_("backend '#{be.NAME}' does not support GUI mode (use --backend podman)")
     os.exit(2)
   end
+  if audio_enabled && be.SUPPORTS_AUDIO == false
+    err_("backend '#{be.NAME}' does not support audio passthrough (use --backend podman)")
+    os.exit(2)
+  end
   # Per-name image pin (from `yolo import`) overrides the global default so
   # an imported VM boots from its custom OCI image instead of the backend
   # default. If neither is set, use the global `image` (which may itself
@@ -367,7 +375,8 @@ def start_vm(name)
     "cwd"       => host_workspace,
     "user"      => USER_FLAG,
     "allow"     => ALLOW,
-    "gui"       => gui_enabled
+    "gui"       => gui_enabled,
+    "audio"     => audio_enabled
   }
   id = be.start(opts)
   os.write_file(state_file(name), id)
@@ -1729,6 +1738,9 @@ if applies_resources && active_yolofile_exists()
   if fm_resolved.gui_set
     gui_enabled = fm_resolved.gui
   end
+  if fm_resolved.audio_set
+    audio_enabled = fm_resolved.audio
+  end
   # CLI --ai-agent / --no-ai-agent wins; otherwise honour Yolofile front matter.
   if !parsed.agent_set && fm_resolved.agent_set
     parsed.agent = fm_resolved.agent
@@ -1744,6 +1756,9 @@ if parsed.backend != ""
 end
 if parsed.gui_set
   gui_enabled = parsed.gui
+end
+if parsed.audio_set
+  audio_enabled = parsed.audio
 end
 
 # Validate backend_sel early (only for vm-creating subcommands) so an unknown

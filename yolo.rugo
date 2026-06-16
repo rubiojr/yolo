@@ -84,6 +84,20 @@ AI_AGENTS = {
 }
 DEFAULT_AI_AGENT = "opencode"
 
+# ---------------- Embedded skills ----------------
+# Agent skills shipped with yolo. `yolo install-skills` writes each into
+# ~/.agents/skills/<name>/SKILL.md so AI coding agents can load them. Add new
+# ones under skills/<name>/SKILL.md and embed them here.
+embed "skills/yolo-user/SKILL.md"       as skill_yolo_user
+embed "skills/yolofile-author/SKILL.md" as skill_yolofile_author
+embed "skills/yolo-developer/SKILL.md"  as skill_yolo_developer
+
+SKILLS = {
+  "yolo-user"       => skill_yolo_user,
+  "yolofile-author" => skill_yolofile_author,
+  "yolo-developer"  => skill_yolo_developer
+}
+
 # ---------------- Config ----------------
 # Bump this on every release tag (also bumped by hand on `main` after a
 # release so `main` builds advertise a `-dev` suffix).
@@ -1071,6 +1085,41 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
 end
 
 # List all embedded provisioners. Marks the one that would be auto-selected.
+# Install the embedded agent skills into ~/.agents/skills/<name>/SKILL.md.
+# Pure local operation — no VM, backend, or Yolofile involved. Existing
+# files are overwritten so re-running updates them to the shipped version.
+def cmd_install_skills
+  home = os.getenv("HOME")
+  if home == ""
+    err_("cannot install skills: HOME is not set")
+    os.exit(1)
+  end
+  base = filepath.join(filepath.join(home, ".agents"), "skills")
+  log("installing skills into #{color.bold(base)}")
+  count = 0
+  for name in SKILLS
+    dir = filepath.join(base, name)
+    made = try `bash -c "mkdir -p #{shell_quote(dir)} && echo OK"` or ""
+    if str.trim(made) != "OK"
+      err_("failed to create #{dir}")
+      os.exit(1)
+    end
+    dest = filepath.join(dir, "SKILL.md")
+    action = "installed"
+    if os.file_exists(dest)
+      action = "updated "
+    end
+    os.write_file(dest, SKILLS[name])
+    log("  #{action} #{color.bold(name)}")
+    count = count + 1
+  end
+  suffix = ""
+  if count != 1
+    suffix = "s"
+  end
+  log("done — #{count} skill#{suffix} in #{base}")
+end
+
 def cmd_provisioners
   auto = ""
   default_label = ""
@@ -1689,6 +1738,14 @@ end
 # ---------------- Main ----------------
 parsed = cli.parse_args(os.args(), AI_AGENTS, DEFAULT_AI_AGENT, VERSION)
 sub = parsed.sub
+
+# `install-skills` is a pure local operation (writes embedded SKILL.md files
+# to ~/.agents/skills). Handle it before any VM/state/Yolofile machinery so a
+# broken Yolofile or missing backend can never block it.
+if sub == "install-skills"
+  cmd_install_skills()
+  os.exit(0)
+end
 
 if parsed.ephemeral && sub != ""
   err_("--ephemeral only works with attach/run mode, not subcommand '#{sub}'")

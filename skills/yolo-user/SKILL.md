@@ -152,6 +152,7 @@ yolo rm     [-n NAME]           Stop + remove the VM and its name binding.
 yolo prune                      Drop name bindings whose VM is gone.
 yolo provision [--provisioner NAME] [-n NAME]   Force re-apply (idempotent).
 yolo provisioners               List provisioners + detected Yolofile.
+yolo install-skills             Install bundled agent skills into ~/.agents/skills.
 yolo export [-n NAME] [-o FILE] Snapshot rootfs + state to a .tar.gz (matchlock).
 yolo import FILE [-n NAME] [--force]   Restore a bundle on another host.
 yolo -V | --version             Print version.

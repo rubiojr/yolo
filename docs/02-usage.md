@@ -114,6 +114,9 @@ yolo --ephemeral [...]          Use a throwaway VM and empty temp workspace.
 yolo --no-provision [...]       Skip auto-provisioning (alias: --no-provisioner).
 yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode).
                                 Known agents: copilot, opencode.
+yolo --gui [...]                Bind-mount the host Wayland socket (podman only).
+yolo --audio [...]              Bind-mount the host PipeWire/PulseAudio socket
+                                so guest apps can play sound (podman only).
 yolo -n NAME [...]              Use a named VM instead of the per-CWD one.
 yolo --disk-size SIZE [...]     Override rootfs disk size for this run.
                                 Accepts 32G, 32g, 512M, 512m, or a bare MiB
@@ -133,6 +136,10 @@ yolo prune                      Drop name bindings whose VM is gone.
 yolo provision [--provisioner NAME] [-n NAME]
                                 Force re-apply a provisioner (idempotent).
 yolo provisioners               List embedded provisioners and detected Yolofile.
+
+yolo install-skills             Install the bundled agent skills into
+                                ~/.agents/skills/<name>/SKILL.md (overwrites
+                                existing copies). Pure local operation.
 
 yolo export [-n NAME] [-o FILE] Snapshot the VM's current rootfs and yolo
                                 state into a single .tar.gz bundle.

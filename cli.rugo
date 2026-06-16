@@ -196,7 +196,7 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     elsif a == "-V" || a == "--version"
       print_version(version)
       os.exit(0)
-    elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners" || a == "export" || a == "import")
+    elsif sub == "" && (a == "ls" || a == "du" || a == "stop" || a == "rm" || a == "logs" || a == "id" || a == "status" || a == "prune" || a == "provision" || a == "provisioners" || a == "export" || a == "import" || a == "install-skills")
       sub = a
     else
       rest = append(rest, a)
@@ -258,6 +258,8 @@ def print_help(default_ai_agent)
   puts "  yolo provision [--provisioner NAME] [-n NAME]"
   puts "                                  Force re-apply a provisioner."
   puts "  yolo provisioners               List provisioners (embedded + ./Yolofile)."
+  puts "  yolo install-skills             Install bundled agent skills into"
+  puts "                                  ~/.agents/skills (overwrites existing)."
   puts ""
   puts "  yolo export [-n NAME] [-o FILE] Export VM rootfs + state into a single"
   puts "                                  .tar.gz (matchlock backend only)."

@@ -1,26 +1,35 @@
 # 1. Getting started
 
 This chapter walks you from "nothing installed" to "I have a persistent
-microVM mounted on my project directory" in three steps.
+dev environment mounted on my project directory" in three steps.
+
+`yolo` can back that environment with either the **matchlock** (microVM,
+the default) or **podman** (container) backend. This chapter uses the
+default; see [Backends](./09-backends.md) to choose.
 
 ## 1.1 Requirements
 
 Before installing `yolo` itself:
 
-- **Linux with KVM.** `/dev/kvm` must be readable and writable by the
-  user that will run `yolo`. On most distros adding yourself to the
-  `kvm` group is enough — log out and back in afterwards.
-- **[matchlock][matchlock-install]** on your `PATH`. `yolo` shells out to
-  it for every VM operation.
+- **Linux.**
+- For the **matchlock backend (default):** KVM — `/dev/kvm` must be
+  readable and writable by the user that will run `yolo`. On most distros
+  adding yourself to the `kvm` group is enough — log out and back in
+  afterwards. Plus **[matchlock][matchlock-install]** on your `PATH`;
+  `yolo` shells out to it for every VM operation.
+- For the **podman backend:** just **[podman][podman-install]** on your
+  `PATH` (no KVM required). Select it with `--backend podman`,
+  `YOLO_BACKEND=podman`, or `backend: podman` in a Yolofile.
 - For building from source only: **[rugo][rugo-install]**. End users do
   not need it — the released `yolo` binary is a single static file with
   no runtime dependencies (provisioners run as plain `bash` inside the
   guest).
 
 [matchlock-install]: https://github.com/jingkaihe/matchlock#install
+[podman-install]: https://podman.io/docs/installation
 [rugo-install]: https://github.com/rubiojr/rugo#install
 
-Verify the host side is ready:
+Verify the host side is ready (matchlock backend):
 
 ```bash
 ls -l /dev/kvm
@@ -94,9 +103,11 @@ already applied `fedora-go` to this VM.
 - `yolo stop` — stop the VM but keep its state on disk.
 - `yolo rm` — stop **and** delete the VM and its rootfs.
 
-> **Heads up:** matchlock does not currently support "resume from
-> stopped". After `yolo stop`, the next `yolo` builds a fresh VM from
-> the OCI image and re-runs the provisioner.
+> **Heads up (matchlock):** matchlock does not currently support "resume
+> from stopped". After `yolo stop`, the next `yolo` builds a fresh VM
+> from the OCI image and re-runs the provisioner. The **podman** backend
+> behaves differently — `yolo stop` preserves the container and the next
+> `yolo` resumes it instantly. See [Backends](./09-backends.md).
 
 ## 1.5 Where to go next
 
@@ -107,3 +118,5 @@ already applied `fedora-go` to this VM.
 - Set up custom tooling for a project that's not Go/Rust/Ruby/Android:
   see [Provisioners](./04-provisioners.md) and the
   [Yolofile reference](./05-yolofile.md).
+- Run containers instead of microVMs, or graphical apps: see
+  [Backends](./09-backends.md).

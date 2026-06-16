@@ -1,6 +1,14 @@
 # yolo
 
-Fast, persistent, per-directory [matchlock][matchlock] microVMs with one-shot provisioning. Written in [rugo][rugo].
+Fast, persistent, per-directory dev environments with one-shot
+provisioning. Written in [rugo][rugo].
+
+`yolo` ships with two interchangeable backends:
+
+- **[matchlock][matchlock]** (default) — Firecracker microVMs with
+  KVM-level isolation.
+- **podman** — host-kernel containers, faster to boot, with GUI/audio
+  passthrough.
 
 [matchlock]: https://github.com/jingkaihe/matchlock
 [rugo]: https://github.com/rubiojr/rugo
@@ -23,11 +31,16 @@ go version go1.26.3 linux/amd64
 
 ## Features
 
-- **Per-directory persistent microVMs.** Each `$PWD` gets its own
-  long-lived Firecracker VM, keyed by a sha1 of the path. Re-running
+- **Per-directory persistent environments.** Each `$PWD` gets its own
+  long-lived VM (or container), keyed by a sha1 of the path. Re-running
   `yolo` reattaches in under a second.
+- **Two backends, one CLI.** Pick microVM isolation (`matchlock`) or fast
+  host-kernel containers (`podman`) with `--backend`, `YOLO_BACKEND`, or
+  `backend:` in a Yolofile. The choice is recorded per-VM so subsequent
+  attaches always reach the right runtime.
 - **Auto-heal.** If the VM was stopped or removed (host reboot, manual
-  `matchlock rm`, …) `yolo` notices and recreates it transparently.
+  `matchlock rm` / `podman rm`, …) `yolo` notices and recreates or resumes
+  it transparently.
 - **Auto-detected provisioning.** `yolo` sniffs your project for
   `go.mod` / `Cargo.toml` / `Gemfile` / `build.gradle` and applies a
   matching built-in provisioner. Project-specific tooling lives in an
@@ -38,17 +51,35 @@ go version go1.26.3 linux/amd64
 - **Your code is mounted live.** `$PWD` shows up inside the guest as
   `/work` (read-write), so edits on either side are immediately
   visible on the other.
-- **Snapshot & share.** `yolo export` / `yolo import` move a fully
-  provisioned VM between hosts.
+- **GUI & audio (podman).** Run graphical Wayland apps with `--gui` and
+  forward PipeWire/PulseAudio with `--audio`.
+- **Snapshot & share (matchlock).** `yolo export` / `yolo import` move a
+  fully provisioned VM between hosts.
 - **Sensible network defaults.** Plain NAT by default with real
   upstream TLS, so `dnf install`, `curl https://…`, `go install`, and
   `git clone` just work. Opt into matchlock's allow-list MITM policy
   via `YOLO_ALLOW=…`.
 
+## Backends at a glance
+
+| Capability                        | matchlock (default) | podman             |
+| --------------------------------- | ------------------- | ------------------ |
+| Isolation                         | KVM microVM         | Container (host kernel) |
+| State preserved across `yolo stop`| No (recreated)      | Yes (resumed)      |
+| GUI (`--gui`) / audio (`--audio`) | No                  | Yes                |
+| `yolo export` / `yolo import`     | Yes                 | No                 |
+| Egress allow-list (`YOLO_ALLOW`)  | Yes                 | No                 |
+| Required binary on `PATH`         | `matchlock`         | `podman`           |
+
+Full details: [`docs/09-backends.md`](./docs/09-backends.md).
+
 ## Requirements
 
-- Linux with KVM (`/dev/kvm` readable and writable)
-- [`matchlock`](https://github.com/jingkaihe/matchlock#install) on `PATH`
+- Linux.
+- **matchlock backend:** KVM (`/dev/kvm` readable and writable) and
+  [`matchlock`](https://github.com/jingkaihe/matchlock#install) on `PATH`.
+- **podman backend:** [`podman`](https://podman.io/) on `PATH` (no KVM
+  needed).
 - For end users: just the prebuilt `yolo` binary (~2 MB static; no
   other runtime deps — provisioners are plain bash run inside the
   guest).
@@ -77,11 +108,14 @@ yolo -- go test ./...
 # Open a separate persistent named VM
 yolo -n notes
 
+# Use the podman backend instead of matchlock
+yolo --backend podman -- go test ./...
+
 # List everything yolo is tracking
 yolo ls
 
 # Stop or remove
-yolo stop          # preserves rootfs
+yolo stop          # podman: preserves state; matchlock: recreated on next attach
 yolo rm            # removes the VM and its name binding
 ```
 
@@ -100,6 +134,7 @@ A chapter-by-chapter tour lives in [`docs/`](./docs/README.md):
 6. [Networking](./docs/06-networking.md)
 7. [Export & import](./docs/07-export-import.md)
 8. [Troubleshooting](./docs/08-troubleshooting.md)
+9. [Backends](./docs/09-backends.md)
 
 For internals (auto-heal, state file layout, provisioner markers,
 source layout) see [`docs/architecture.md`](./docs/architecture.md).

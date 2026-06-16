@@ -9,6 +9,10 @@ This is the workflow when you want to share a fully-provisioned dev
 environment with a teammate, or move a VM between machines without
 re-running expensive provisioners.
 
+> **matchlock only.** Export/import relies on matchlock's image format.
+> The podman backend does not support it; `yolo export`/`import` refuse to
+> run against a podman-backed VM. See [Backends](./09-backends.md).
+
 ## 7.1 Exporting a VM
 
 ```bash

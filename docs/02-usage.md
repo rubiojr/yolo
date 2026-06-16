@@ -73,9 +73,10 @@ TOTAL                                                        4.8 GiB       64 Gi
 ## 2.4 Auto-heal
 
 `yolo` is idempotent: if the VM behind a name has been removed by a host
-reboot, a `matchlock rm`, or anything else, the next `yolo` invocation
-notices and silently rebuilds. You should never need to manually
-`matchlock kill && matchlock rm` to recover.
+reboot, a `matchlock rm` / `podman rm`, or anything else, the next `yolo`
+invocation notices and silently rebuilds (or, for podman, resumes a
+stopped container). You should never need to manually clean up to
+recover.
 
 For a deeper look at the algorithm, see
 [architecture.md § Auto-heal](./architecture.md#1-auto-heal).
@@ -118,6 +119,8 @@ yolo --gui [...]                Bind-mount the host Wayland socket (podman only)
 yolo --audio [...]              Bind-mount the host PipeWire/PulseAudio socket
                                 so guest apps can play sound (podman only).
 yolo -n NAME [...]              Use a named VM instead of the per-CWD one.
+yolo --backend NAME [...]       Pick a backend (matchlock|podman) for a new VM.
+                                Sticky once the VM exists; rm it to switch.
 yolo --disk-size SIZE [...]     Override rootfs disk size for this run.
                                 Accepts 32G, 32g, 512M, 512m, or a bare MiB
                                 integer. Takes effect when the VM is first

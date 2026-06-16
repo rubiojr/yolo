@@ -33,6 +33,19 @@ which matchlock && matchlock --version
 
 [matchlock-install]: https://github.com/jingkaihe/matchlock#install
 
+### Using the podman backend instead
+
+The `/dev/kvm` and `matchlock` requirements above apply only to the
+default matchlock backend. If you can't (or don't want to) use KVM, run
+with the podman backend — it needs only `podman` on your `PATH`:
+
+```bash
+which podman && podman --version
+YOLO_BACKEND=podman yolo            # or: yolo --backend podman
+```
+
+See [Backends](./09-backends.md) for the capability differences.
+
 ### `Network is unreachable` inside the VM
 
 matchlock's host networking (bridge/TAP setup) didn't initialize

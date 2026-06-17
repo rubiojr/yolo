@@ -18,7 +18,9 @@ fi
 
 # SDK + emulator runtime deps (per the Fedora instructions), plus tools used
 # below and Wayland/Mesa bits so the SDL2-based emulator window renders under
-# `--backend podman --gui`.
+# `--backend podman --gui`. The arm-none-eabi-* packages provide the bare-metal
+# ARM toolchain (arm-none-eabi-gcc + newlib) that `pebble build` needs to
+# compile apps for the watch.
 dnf -q install \
     vim \
     less \
@@ -30,6 +32,10 @@ dnf -q install \
     tar \
     nodejs \
     npm \
+    arm-none-eabi-gcc-cs \
+    arm-none-eabi-gcc-cs-c++ \
+    arm-none-eabi-newlib \
+    arm-none-eabi-binutils-cs \
     SDL2 \
     glib2 \
     pixman \
@@ -106,9 +112,30 @@ uv tool install --quiet pebble-tool
 # SDL2 should auto-detect the Wayland socket bind-mounted by `--gui`, but pin
 # the driver so the emulator never tries (and fails) to reach a non-existent X
 # server. Applied to every interactive shell.
+#
+# Also wrap `pebble` with a shell function so that any `pebble install
+# --emulator ...` invocation clears the stale emulator state first (see the
+# pebble-emu-reset note below). This makes relaunching the emulator robust
+# against the ECONNREFUSED bug without the user remembering to reset by hand.
 if ! grep -q 'SDL_VIDEODRIVER' /etc/profile.d/pebble.sh 2>/dev/null; then
     cat > /etc/profile.d/pebble.sh <<'EOF'
 export SDL_VIDEODRIVER=wayland
+
+pebble() {
+    for arg in "$@"; do
+        case "$arg" in
+            --emulator)
+                case " $* " in
+                    *" install "*)
+                        pebble-emu-reset >/dev/null 2>&1 || true
+                        break
+                        ;;
+                esac
+                ;;
+        esac
+    done
+    command pebble "$@"
+}
 EOF
 fi
 
@@ -137,5 +164,5 @@ echo "==> [yolofile] next steps:"
 echo "    pebble sdk install latest          # download an SDK toolchain"
 echo "    pebble new-project myproject"
 echo "    cd myproject && pebble build"
-echo "    pebble install --emulator emery    # launches the GUI emulator"
-echo "    pebble-emu-reset emery             # if relaunch fails with 'Connection refused'"
+echo "    pebble install --emulator emery    # launches the GUI emulator (auto-resets stale state)"
+echo "    pebble-emu-reset                   # manual cleanup, if ever needed"

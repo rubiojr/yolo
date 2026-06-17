@@ -1,0 +1,141 @@
+---
+image: fedora:44
+cpus: 2
+memory: 4G
+disk-size: 20G
+description: Provision a VM with the Pebble SDK (https://developer.repebble.com/sdk/) and emulator.
+backend: podman
+gui: true
+---
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if ! grep -q '^assumeyes' /etc/dnf/dnf.conf 2>/dev/null; then
+    echo 'assumeyes=True' >> /etc/dnf/dnf.conf
+    echo 'install_weak_deps=False' >> /etc/dnf/dnf.conf
+fi
+
+# SDK + emulator runtime deps (per the Fedora instructions), plus tools used
+# below and Wayland/Mesa bits so the SDL2-based emulator window renders under
+# `--backend podman --gui`.
+dnf -q install \
+    vim \
+    less \
+    which \
+    procps-ng \
+    ca-certificates \
+    curl-minimal \
+    git \
+    tar \
+    nodejs \
+    npm \
+    SDL2 \
+    glib2 \
+    pixman \
+    zlib \
+    alsa-lib \
+    pulseaudio-libs \
+    bzip2-libs \
+    mesa-dri-drivers \
+    mesa-libGL \
+    libglvnd-egl
+
+# The prebuilt `qemu-pebble` was linked on Debian/Ubuntu and pulls in a few
+# libraries that Fedora either names differently or doesn't package. We satisfy
+# them under /usr/local/lib, so make sure the runtime loader searches there.
+echo /usr/local/lib > /etc/ld.so.conf.d/local.conf
+mkdir -p /usr/local/lib
+
+# bzip2's soname is libbz2.so.1.0 on Debian/Ubuntu; Fedora ships libbz2.so.1.
+# Add a compat symlink so the loader resolves it. NOTE: it must live in a
+# default trusted dir (next to the real lib, i.e. /usr/lib64) and NOT in
+# /usr/local/lib — ldconfig keys its cache by the library's embedded SONAME
+# (libbz2.so.1), so a /usr/local/lib/libbz2.so.1.0 symlink would never be
+# cached under the name the emulator asks for. In a default dir the loader
+# finds it by filename directly.
+real_bz2=$(ldconfig -p | sed -n 's/.*=> //p' | grep -m1 '/libbz2\.so\.1$' || true)
+if [ -n "${real_bz2}" ]; then
+    ln -sf "${real_bz2}" "$(dirname "${real_bz2}")/libbz2.so.1.0"
+fi
+
+# qemu-pebble is dynamically linked against libsndio.so.7, but sndio is not
+# packaged for Fedora. Build the library from source so the loader is satisfied
+# (the emulator uses SDL/Pulse for actual audio; sndio just needs to be
+# present). Idempotent: skip if already built.
+if [ ! -e /usr/local/lib/libsndio.so.7 ]; then
+    echo "==> [yolofile] building sndio from source (not packaged on Fedora)"
+    dnf -q install gcc make alsa-lib-devel
+
+    SNDIO_VER="1.10.0"
+    SNDIO_SHA256="bebd3bfd01c50c9376cf3e7814b9379bed9e17d0393b5113b7eb7a3d0d038c54"
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "${tmpdir}"' EXIT
+    cd "${tmpdir}"
+
+    curl -fsSLO "https://sndio.org/sndio-${SNDIO_VER}.tar.gz"
+    echo "${SNDIO_SHA256}  sndio-${SNDIO_VER}.tar.gz" | sha256sum -c -
+
+    tar xzf "sndio-${SNDIO_VER}.tar.gz"
+    cd "sndio-${SNDIO_VER}"
+    ./configure --prefix=/usr/local
+    make
+    make install
+    cd /
+fi
+
+# Refresh the loader cache so the compat symlink + sndio under /usr/local/lib
+# are resolvable.
+ldconfig
+
+# Install uv (the recommended way to get the Pebble CLI) system-wide so the
+# binary lands on PATH for the root shell yolo drops you into.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "==> [yolofile] installing uv"
+    export UV_INSTALL_DIR=/usr/local/bin
+    export UV_UNMANAGED_INSTALL=/usr/local/bin
+    curl -fsSL https://astral.sh/uv/install.sh | sh
+fi
+
+# Install the Pebble CLI as a uv tool, exposing its launcher in /usr/local/bin.
+echo "==> [yolofile] installing pebble-tool"
+export UV_TOOL_DIR=/opt/uv/tools
+export UV_TOOL_BIN_DIR=/usr/local/bin
+uv tool install --quiet pebble-tool
+
+# SDL2 should auto-detect the Wayland socket bind-mounted by `--gui`, but pin
+# the driver so the emulator never tries (and fails) to reach a non-existent X
+# server. Applied to every interactive shell.
+if ! grep -q 'SDL_VIDEODRIVER' /etc/profile.d/pebble.sh 2>/dev/null; then
+    cat > /etc/profile.d/pebble.sh <<'EOF'
+export SDL_VIDEODRIVER=wayland
+EOF
+fi
+
+# Helper to recover from pebble-tool's stale-emulator bug. pebble-tool records
+# the running qemu/pypkjs PIDs+ports in /tmp/pb-emulator.json and decides
+# whether to reuse them with os.kill(pid, 0). In a container those PIDs get
+# reused after the emulator window closes, so it wrongly thinks the emulator is
+# still alive and tries to reconnect to a dead port (ECONNREFUSED). Clearing the
+# state file forces a clean respawn. Run `pebble-emu-reset` to just clean up, or
+# `pebble-emu-reset <platform>` to clean up and relaunch.
+cat > /usr/local/bin/pebble-emu-reset <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+rm -f /tmp/pb-emulator.json /tmp/pb-qemu-pypkjs-*.json
+pkill -f qemu-pebble 2>/dev/null || true
+pkill -f pypkjs 2>/dev/null || true
+echo "pebble emulator state cleared"
+if [ "$#" -gt 0 ]; then
+    exec pebble install --emulator "$@"
+fi
+EOF
+chmod 0755 /usr/local/bin/pebble-emu-reset
+
+echo "==> [yolofile] installed: $(pebble --version 2>/dev/null || echo pebble-tool)"
+echo "==> [yolofile] next steps:"
+echo "    pebble sdk install latest          # download an SDK toolchain"
+echo "    pebble new-project myproject"
+echo "    cd myproject && pebble build"
+echo "    pebble install --emulator emery    # launches the GUI emulator"
+echo "    pebble-emu-reset emery             # if relaunch fails with 'Connection refused'"

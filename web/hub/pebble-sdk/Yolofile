@@ -117,8 +117,11 @@ uv tool install --quiet pebble-tool
 # --emulator ...` invocation clears the stale emulator state first (see the
 # pebble-emu-reset note below). This makes relaunching the emulator robust
 # against the ECONNREFUSED bug without the user remembering to reset by hand.
-if ! grep -q 'SDL_VIDEODRIVER' /etc/profile.d/pebble.sh 2>/dev/null; then
-    cat > /etc/profile.d/pebble.sh <<'EOF'
+#
+# Written unconditionally (no grep guard): the content is fully deterministic,
+# and a guard keyed on an existing line would prevent updates from reaching
+# containers provisioned by an older version of this Yolofile on re-provision.
+cat > /etc/profile.d/pebble.sh <<'EOF'
 export SDL_VIDEODRIVER=wayland
 
 pebble() {
@@ -137,7 +140,6 @@ pebble() {
     command pebble "$@"
 }
 EOF
-fi
 
 # Helper to recover from pebble-tool's stale-emulator bug. pebble-tool records
 # the running qemu/pypkjs PIDs+ports in /tmp/pb-emulator.json and decides

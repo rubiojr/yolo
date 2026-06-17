@@ -62,6 +62,18 @@ provisioners/
     copilot.sh
     opencode.sh
 docs/                # chapter-by-chapter user docs + architecture.md
+skills/              # agent skills (source of truth), embedded + installed
+  yolo-user/SKILL.md       # using yolo
+  yolofile-author/SKILL.md # authoring Yolofiles
+  yolo-developer/SKILL.md  # developing yolo (this file)
+web/                 # the yolo hub — static GitHub Pages site (yolo.rbel.co)
+  index.html         # hub UI; fetches hub/index.json + each hub/*/Yolofile
+  install.sh         # the `curl … | bash` installer
+  hub/
+    index.json       # generated manifest: JSON array of slug dirs (do not hand-edit)
+    <slug>/Yolofile  # one published, grab-and-go Yolofile per directory
+scripts/
+  gen-hub-index.sh   # regenerates web/hub/index.json from the slug dirs
 Yolofile             # yolo's OWN self-hosting provisioner (Go + rugo); not the reference
 rugo-quirks.md       # rugo bugs/workarounds encountered while writing yolo
 README.md
@@ -198,6 +210,62 @@ Read `backends/INTERFACE.md` first. Then:
 AI-agent installers follow the same pattern under
 `provisioners/ai-agents/<name>.sh`, embedded into the `AI_AGENTS` hash,
 applied as a separate marker on top of the language provisioner.
+
+## Editing agent skills
+
+The agent skills are **source of truth in `skills/<name>/SKILL.md`** and are
+**embedded into the binary at compile time** (`embed "skills/<name>/SKILL.md"
+as skill_<name>` near the top of `yolo.rugo`, collected into the `SKILLS` hash).
+`yolo install-skills` writes each embedded copy to
+`~/.agents/skills/<name>/SKILL.md` for AI coding agents to load.
+
+So when changing a skill:
+
+- **Edit the repo copy** under `skills/<name>/SKILL.md` — never the installed
+  `~/.agents/skills/<name>/SKILL.md` (it is a generated copy and gets
+  overwritten by the next `yolo install-skills`).
+- Because they're `embed`-ed, a change only ships after a **rebuild**
+  (`rugo build yolo.rugo`) followed by `yolo install-skills` to refresh the
+  on-disk copy.
+- Adding a **new** skill: create `skills/<name>/SKILL.md`, add an
+  `embed … as skill_<name>` line plus a `"<name>" => skill_<name>` entry in the
+  `SKILLS` hash, then rebuild.
+
+## Publishing a Yolofile to the hub
+
+The **yolo hub** (`web/`) is a static GitHub Pages site (`yolo.rbel.co`)
+listing curated, grab-and-go Yolofiles. Each entry is a directory under
+`web/hub/<slug>/` containing a single `Yolofile`. Users consume one with:
+
+```bash
+yolo --yolofile https://yolo.rbel.co/hub/<slug>/Yolofile   # https only
+```
+
+To add an entry:
+
+1. Create `web/hub/<slug>/Yolofile`. `<slug>` is the card name shown on the
+   hub (lowercase, no spaces/quotes/backslashes).
+2. **Include front matter with a `description:`** — the page parses each
+   Yolofile's front matter *in the browser* and renders `description` on the
+   card. Keep the usual conventions: idempotent body, `set -euo pipefail`,
+   Fedora `dnf`, echo progress as `==> [yolofile] …`, and **verify checksums**
+   for any downloaded binary (see `web/hub/cliamp/Yolofile` as the reference).
+3. Regenerate the manifest:
+
+   ```bash
+   scripts/gen-hub-index.sh        # rewrites web/hub/index.json
+   ```
+
+   GitHub Pages has no directory listing, so `index.html` discovers entries
+   via `hub/index.json` (a sorted JSON array of the slug dirs). **Never
+   hand-edit `index.json`** — it is generated, and CI re-runs
+   `gen-hub-index.sh` before every Pages deploy
+   (`.github/workflows/static.yml`), so a stale manifest is overwritten.
+
+The script deliberately does **not** duplicate the front-matter parser —
+the Yolofiles stay the single source of truth and the browser parses them.
+No rebuild is needed (the hub is plain static assets, not embedded in the
+binary).
 
 ## Provisioner execution contract
 

@@ -101,7 +101,7 @@ SKILLS = {
 # ---------------- Config ----------------
 # Bump this on every release tag (also bumped by hand on `main` after a
 # release so `main` builds advertise a `-dev` suffix).
-VERSION = "0.2.1"
+VERSION = "0.7.0"
 
 def env_or(name, fallback)
   v = os.getenv(name)
@@ -152,6 +152,12 @@ gui_enabled = false
 # Audio passthrough requested for this invocation. Honoured by backends
 # where SUPPORTS_AUDIO is true; refused at the CLI layer otherwise.
 audio_enabled = false
+
+# Host ports to publish into the guest for this invocation, as canonical
+# "HOST:GUEST" specs (e.g. "8080:80"). Set from --publish flags and/or
+# Yolofile `publish:` front matter before the first backend start(). Bound to
+# 127.0.0.1 by the backends. Applied at VM creation only (like cpus/memory).
+publish_ports = []
 
 # Host directory mounted at WORKSPACE. Normal runs mount the invoking cwd;
 # --ephemeral replaces this with a fresh temporary directory.
@@ -390,7 +396,8 @@ def start_vm(name)
     "user"      => USER_FLAG,
     "allow"     => ALLOW,
     "gui"       => gui_enabled,
-    "audio"     => audio_enabled
+    "audio"     => audio_enabled,
+    "publish"   => publish_ports
   }
   id = be.start(opts)
   os.write_file(state_file(name), id)
@@ -1798,6 +1805,9 @@ if applies_resources && active_yolofile_exists()
   if fm_resolved.audio_set
     audio_enabled = fm_resolved.audio
   end
+  if len(fm_resolved.publish) > 0
+    publish_ports = fm_resolved.publish
+  end
   # CLI --ai-agent / --no-ai-agent wins; otherwise honour Yolofile front matter.
   if !parsed.agent_set && fm_resolved.agent_set
     parsed.agent = fm_resolved.agent
@@ -1816,6 +1826,11 @@ if parsed.gui_set
 end
 if parsed.audio_set
   audio_enabled = parsed.audio
+end
+# CLI --publish replaces any Yolofile `publish:` set (consistent with the
+# replace-not-merge precedence used for the other resource settings).
+if len(parsed.publish) > 0
+  publish_ports = parsed.publish
 end
 
 # Validate backend_sel early (only for vm-creating subcommands) so an unknown

@@ -89,3 +89,55 @@ If you're not certain you need the allow-list policy, don't set
 | Specific host fails, others work, MITM enabled   | Host is not in `YOLO_ALLOW`                        |
 
 See [Troubleshooting](./08-troubleshooting.md) for more.
+
+## 6.7 Publishing guest ports to the host
+
+The two modes above are about **outbound** traffic. To reach a service
+running **inside** the VM from your host — a dev web server, an API, a
+database — publish its port.
+
+Publish with `--publish` (alias `-p`), repeatable:
+
+```bash
+# guest service on :8080, reachable on the host at 127.0.0.1:8080
+yolo --publish 8080 -- python3 -m http.server 8080 --bind 0.0.0.0
+
+# remap: host 8080 -> guest 80, plus expose postgres
+yolo --publish 8080:80 --publish 5432:5432
+```
+
+…or declare it once per project in a [Yolofile](./05-yolofile.md#publish)'s
+front matter (comma-separated, since front matter has no lists):
+
+```bash
+---
+publish: 8080:80, 5432:5432
+---
+#!/usr/bin/env bash
+set -euo pipefail
+dnf -q install nginx postgresql-server
+```
+
+Then from the host:
+
+```bash
+curl http://127.0.0.1:8080
+```
+
+Both backends (matchlock and podman) support publishing. Key points:
+
+- **Spec format is `[HOST_PORT:]GUEST_PORT`.** A bare `PORT` means
+  `PORT:PORT`, so the host port is deterministic.
+- **Ports bind to `127.0.0.1`** (loopback) on the host — the service is
+  reachable from the host machine, not from the LAN. yolo intentionally
+  does not expose published ports on `0.0.0.0`.
+- **The guest service must listen on `0.0.0.0`**, not `127.0.0.1`.
+  A server bound to the guest's loopback can't be reached through the
+  forward.
+- **Publishing is fixed at VM creation**, like `cpus` / `memory` /
+  `disk-size`. To change the published ports of an existing VM,
+  `yolo rm` then re-attach. On matchlock, a `yolo stop` + reattach
+  recreates the VM and re-applies the current `--publish` / `publish:`
+  set anyway.
+- A CLI `--publish` flag **replaces** any Yolofile `publish:` set for that
+  run (replace, not merge — matching the other resource overrides).

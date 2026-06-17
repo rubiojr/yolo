@@ -66,6 +66,7 @@ dnf -q install go git make
 | `disk-size` (aliases `disk`, `disk_mb`) | size  | `32768` (MiB)      | `64G`, `100g`, `32768` |
 | `backend`                             | string  | `matchlock`        | `matchlock`, `podman` |
 | `gui`                                 | bool    | `false`            | `true`, `false` |
+| `publish`                             | ports   | unset              | `8080`, `8080:80`, `8080:80, 5432:5432` |
 | `ai-agent`                            | string  | unset              | `opencode`, `copilot`, `none`, `default` |
 | `description`                         | string  | —                  | free-form; ignored by yolo (annotation only) |
 
@@ -85,6 +86,15 @@ the recorded backend wins over any later front-matter change. To switch,
 
 **`gui: true`** only has effect with `backend: podman` (bind-mounts the
 host Wayland socket). It is ignored/refused under matchlock.
+
+**`publish`** forwards guest ports to the host so you can reach a VM
+service. Front matter has no lists, so use a comma-separated value of
+`[HOST:]GUEST` specs: `publish: 8080:80, 5432:5432`. A bare `PORT` means
+`PORT:PORT`. Ports must be `1–65535` (digits only — like `image`, the
+value flows into a host-side shell command). Bound to `127.0.0.1` on both
+backends; the **guest** service must listen on `0.0.0.0`. Applied at VM
+creation only (edit → `yolo rm` → `yolo` to change). A CLI `--publish`
+flag replaces this list.
 
 **`ai-agent`** layers an AI coding agent on top of the body. Values:
 a known agent (`opencode`, `copilot`); `default`/`true` (= the built-in

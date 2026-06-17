@@ -78,6 +78,18 @@ def _start_impl(opts)
     allow_arg = "--allow-host \"#{allow}\""
   end
 
+  # Published ports. Each spec is already validated as canonical
+  # "HOST:GUEST" (digits + single ':') upstream, so splicing it in is safe.
+  # matchlock binds published ports to 127.0.0.1 by default (its --address
+  # default), which is what we want — yolo never exposes them on 0.0.0.0.
+  publish_arg = ""
+  pubs = opts["publish"]
+  if pubs != nil
+    for p in pubs
+      publish_arg = publish_arg + " -p " + p
+    end
+  end
+
   # --rm=false is required for `matchlock exec` to work afterwards: ephemeral
   # (`--rm=true`, the default in some matchlock paths) VMs do not create the
   # exec relay socket, and the next `matchlock exec <id>` errors out with
@@ -96,6 +108,7 @@ def _start_impl(opts)
       --disk-size #{opts["disk_mb"]} \
       #{allow_arg} \
       #{user_arg} \
+      #{publish_arg} \
       --rm=false \
       -d 2>&1
   SH

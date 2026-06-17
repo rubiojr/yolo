@@ -57,6 +57,13 @@ be.logs(id, extra)              -> ()          # streams VM/container log to the
 - `audio`      — bool; when true, backend must wire the host sound server
                  (PipeWire/PulseAudio) into the guest. Only honoured when
                  `SUPPORTS_AUDIO` is true; yolo refuses earlier otherwise.
+- `publish`    — list of canonical `"HOST:GUEST"` port specs (e.g.
+                 `["8080:80", "5432:5432"]`) to forward from the host into
+                 the guest. Each spec is pre-validated upstream as digits +
+                 a single `:` (so it is safe to splice into a shell command).
+                 Backends bind these on `127.0.0.1` (loopback) — never
+                 `0.0.0.0`. The list may be empty. Honoured by every backend;
+                 there is no capability flag for it.
 
 ## Exec channels
 

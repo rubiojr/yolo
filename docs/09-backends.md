@@ -16,6 +16,7 @@ For the internal contract that every backend must implement, see
 | In-guest state across `yolo stop`   | **Not preserved** (recreate on next attach) | **Preserved** (resume on next attach) |
 | GUI apps (Wayland)                  | No               | Yes (`--gui`)                 |
 | Audio (PipeWire/PulseAudio)         | No               | Yes (`--audio`)               |
+| Publish guest ports (`--publish`)   | Yes              | Yes                           |
 | `yolo export` / `yolo import`       | Yes              | No                            |
 | Egress allow-list (`YOLO_ALLOW`)    | Yes (MITM proxy) | Ignored                       |
 | Disk size cap (`YOLO_DISK_MB`)      | Yes              | Ignored (uses host fs)        |

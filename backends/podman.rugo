@@ -116,6 +116,18 @@ def _start_impl(opts)
     audio_args = _build_audio_args()
   end
 
+  # Published ports. Each spec is already validated as canonical "HOST:GUEST"
+  # (digits + single ':') upstream. We bind to 127.0.0.1 explicitly so the
+  # default matches matchlock (which binds loopback) — yolo never exposes
+  # guest ports on 0.0.0.0.
+  publish_args = ""
+  pubs = opts["publish"]
+  if pubs != nil
+    for p in pubs
+      publish_args = publish_args + "-p 127.0.0.1:" + p + " "
+    end
+  end
+
   # Hostname inside the container. Podman defaults to the container id;
   # set it to the binding name for prettier prompts (mirrors matchlock).
   cmd = "podman run -d --name " + _sh_squote(cname) + " " +
@@ -125,6 +137,7 @@ def _start_impl(opts)
         user_arg + " " +
         gui_args + " " +
         audio_args + " " +
+        publish_args +
         _sh_squote(img) + " " +
         "sleep infinity"
 

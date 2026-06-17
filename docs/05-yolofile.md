@@ -128,6 +128,7 @@ a single `key: value` pair.
 | `backend`                                | string  | `matchlock`  | `matchlock`, `podman`                   |
 | `gui`                                    | bool    | `false`      | `true`, `false`                         |
 | `audio`                                  | bool    | `false`      | `true`, `false`                         |
+| `publish`                                | ports   | *(none)*     | `8080`, `8080:80`, `8080:80, 5432:5432` |
 | `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
 | `description`                            | string  | *(unset)*    | `Dev VM for the billing API`            |
 
@@ -163,6 +164,50 @@ without `gui`. Has no effect when `backend` is `matchlock` (it would
 refuse the invocation; see `--audio` in `yolo --help`). Apps that use
 ALSA directly need an ALSA→Pulse bridge in the image; see
 [Backends](./09-backends.md#audio-passthrough---audio).
+
+#### `publish`
+
+Publish one or more guest ports to the host so you can reach a service
+running inside the VM (a dev web server, a database, etc.). Equivalent to
+passing `--publish` on the command line.
+
+Front matter can't express lists, so `publish` takes a **comma-separated**
+value. Each entry is `[HOST_PORT:]GUEST_PORT`:
+
+```bash
+---
+# one port, same number on both sides (8080 -> 8080)
+publish: 8080
+---
+```
+
+```bash
+---
+# remap host 8080 -> guest 80, and expose postgres on 5432
+publish: 8080:80, 5432:5432
+---
+```
+
+Rules and behaviour:
+
+- A bare `PORT` is expanded to `PORT:PORT`, so the host port is always
+  deterministic (on `podman`, a bare port would otherwise pick a random
+  host port).
+- Each port must be an integer in `1–65535`. Anything else — extra colons,
+  non-numeric text, out-of-range numbers — is an error. The digits-only
+  shape is also a safety property: the value flows into a host-side
+  `matchlock run` / `podman run` command, like `image`.
+- Ports are bound on **`127.0.0.1`** (loopback) on both backends, so a
+  published service is reachable from the host but not from your LAN.
+- The **guest** service must listen on `0.0.0.0` (not `127.0.0.1`), or the
+  forwarded connection has nothing to talk to.
+- Publishing happens at **VM creation** only (like `cpus` / `memory` /
+  `disk-size`). Editing `publish:` does **not** re-publish on an existing
+  VM — `yolo rm` then `yolo` to apply the change.
+- A CLI `--publish` flag **replaces** the front-matter list for that run.
+
+See [Networking § Publishing guest ports](./06-networking.md#67-publishing-guest-ports-to-the-host)
+for a full walkthrough.
 
 #### `image`
 

@@ -72,6 +72,59 @@ def parse_disk_size(s)
   return conv.to_s(n * multiplier)
 end
 
+# ---------------- Port publishing ----------------
+# A single TCP/UDP port number, 1..65535, digits only. Digits-only is also a
+# security property: published port specs flow verbatim into the host-side
+# `matchlock run -p …` / `podman run -p …` command lines, so rejecting
+# anything but digits (and the single ':' separator below) blocks shell
+# injection. Duplicated in yolofile.rugo (small, pure, stable) to keep the
+# modules standalone, matching the parse_disk_size convention.
+def _valid_port(s)
+  if s == "" || len(s) > 5
+    return false
+  end
+  for ch in str.chars(s)
+    if ch < "0" || ch > "9"
+      return false
+    end
+  end
+  n = try conv.to_i(s) or -1
+  if n < 1 || n > 65535
+    return false
+  end
+  return true
+end
+
+# Normalize a publish spec `[HOST_PORT:]GUEST_PORT` to its canonical
+# `HOST_PORT:GUEST_PORT` form. A bare `PORT` expands to `PORT:PORT` so both
+# backends bind a deterministic host port (podman would otherwise pick a
+# random one). Returns "" if the spec is malformed (more than one ':' or any
+# out-of-range / non-numeric port).
+def normalize_publish(s)
+  t = str.trim(s)
+  if t == ""
+    return ""
+  end
+  idx = str.index(t, ":")
+  if idx < 0
+    if !_valid_port(t)
+      return ""
+    end
+    return t + ":" + t
+  end
+  host  = str.slice(t, 0, idx)
+  guest = str.slice(t, idx + 1, len(t))
+  # Reject a second colon (host:guest:extra) — keeps the spec unambiguous and
+  # free of anything we'd have to escape.
+  if str.index(guest, ":") >= 0
+    return ""
+  end
+  if !_valid_port(host) || !_valid_port(guest)
+    return ""
+  end
+  return host + ":" + guest
+end
+
 # ---------------- Arg parsing ----------------
 # Parse a flat argv into: subcommand, -n name, --provisioner, --yolofile,
 # --ephemeral, --ai-agent, --backend, --gui / --no-gui, rest, -- passthrough.
@@ -107,6 +160,7 @@ def parse_args(args, ai_agents, default_ai_agent, version)
   audio_set = false
   yolofile_path = ""
   ephemeral = false
+  publish = []
   i = 0
   while i < len(args)
     a = args[i]
@@ -129,6 +183,18 @@ def parse_args(args, ai_agents, default_ai_agent, version)
       yolofile_path = args[i]
     elsif a == "--ephemeral"
       ephemeral = true
+    elsif a == "--publish" || a == "-p"
+      i = i + 1
+      if i >= len(args)
+        _err("--publish requires a value (e.g. 8080 or 8080:80)")
+        os.exit(2)
+      end
+      spec = normalize_publish(args[i])
+      if spec == ""
+        _err("invalid --publish value: '#{args[i]}' (expected [HOST:]GUEST, each port 1-65535)")
+        os.exit(2)
+      end
+      publish = append(publish, spec)
     elsif a == "--no-provision" || a == "--no-provisioner"
       no_prov = true
     elsif a == "-o" || a == "--output"
@@ -203,14 +269,14 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     end
     i = i + 1
   end
-  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set)
+  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish)
 end
 
 # Build the parsed-args hash. Factored out only because parse_args has two
 # return points (the -h sentinel path and the normal end-of-loop path) and
 # duplicating the 15-field literal twice is asking for drift.
-def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set)
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set}
+def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish)
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set, publish: publish}
 end
 
 # ---------------- Help / version ----------------
@@ -241,6 +307,11 @@ def print_help(default_ai_agent)
   puts "                                  socket into the guest so apps can play"
   puts "                                  sound. Requires --backend podman."
   puts "  yolo -n NAME [...]              Use a named VM."
+  puts "  yolo --publish [HOST:]GUEST [...]"
+  puts "                                  Publish a guest port to the host (bound to"
+  puts "                                  127.0.0.1). Repeatable; also -p. A bare PORT"
+  puts "                                  maps PORT:PORT. Applied at VM creation; the"
+  puts "                                  guest service must listen on 0.0.0.0."
   puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."
   puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
   puts "                                  MiB integer. Takes effect when the VM is"
@@ -283,7 +354,7 @@ def print_help(default_ai_agent)
   puts "  automatically re-provisions (content-hashed for the marker)."
   puts "  May begin with a YAML-style '---' front matter block declaring"
   puts "  VM-creation overrides (image, cpus, memory, disk-size, backend,"
-  puts "  gui, audio). See docs/05-yolofile.md for the full format."
+  puts "  gui, audio, publish). See docs/05-yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image (default depends on backend)"

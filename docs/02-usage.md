@@ -118,6 +118,11 @@ yolo --ai-agent [NAME] [...]    Also install an AI agent (default: opencode).
 yolo --gui [...]                Bind-mount the host Wayland socket (podman only).
 yolo --audio [...]              Bind-mount the host PipeWire/PulseAudio socket
                                 so guest apps can play sound (podman only).
+yolo --publish [HOST:]GUEST [...]
+                                Publish a guest port to the host on 127.0.0.1.
+                                Repeatable; also -p. A bare PORT means PORT:PORT.
+                                Applied at VM creation; the guest service must
+                                listen on 0.0.0.0. See docs/06-networking.md.
 yolo -n NAME [...]              Use a named VM instead of the per-CWD one.
 yolo --backend NAME [...]       Pick a backend (matchlock|podman) for a new VM.
                                 Sticky once the VM exists; rm it to switch.

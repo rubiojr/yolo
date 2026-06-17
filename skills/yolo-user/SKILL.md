@@ -178,6 +178,11 @@ yolo -h | --help                Full help with env-var defaults.
   pulse).
 - `--disk-size SIZE` — rootfs size for THIS creation (`32G`, `512M`, or
   bare MiB). Only takes effect when the VM is first created.
+- `--publish [HOST:]GUEST` / `-p` — publish a guest port to the host on
+  `127.0.0.1` (e.g. `--publish 8080:80`; a bare `8080` means `8080:8080`).
+  Repeatable. Works on both backends. The guest service must listen on
+  `0.0.0.0`. Set at VM creation only; also a Yolofile `publish:` key
+  (comma-separated). Reach it from the host with `curl 127.0.0.1:HOST`.
 
 ## Environment variables
 
@@ -212,6 +217,7 @@ built-in default. A `yolo import` image pin overrides the resolved image.
 | State across `yolo stop`         | **lost** (recreate) | **preserved** (resume) |
 | GUI apps (Wayland, `--gui`)      | no                  | yes                 |
 | Audio (`--audio`)                | no                  | yes                 |
+| Publish ports (`--publish`)      | yes                 | yes                 |
 | `export` / `import`              | yes                 | no                  |
 | `YOLO_ALLOW` egress allow-list   | yes                 | ignored             |
 | `YOLO_DISK_MB` cap               | yes                 | ignored (host fs)   |

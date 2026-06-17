@@ -80,6 +80,54 @@ def _parse_size(s)
   return conv.to_s(n * multiplier)
 end
 
+# ---------------- Port publishing ----------------
+# Duplicated from cli.rugo (small, pure, stable). A published port spec flows
+# verbatim into the host-side `matchlock run -p …` / `podman run -p …` command
+# lines, so the digits-only + single-':' shape is a security property as much
+# as a format check — it blocks shell injection via front matter (which may
+# come from an untrusted `--yolofile URL`).
+def _valid_port(s)
+  if s == "" || len(s) > 5
+    return false
+  end
+  for ch in str.chars(s)
+    if ch < "0" || ch > "9"
+      return false
+    end
+  end
+  n = try conv.to_i(s) or -1
+  if n < 1 || n > 65535
+    return false
+  end
+  return true
+end
+
+# Normalize a publish spec `[HOST_PORT:]GUEST_PORT` to canonical
+# `HOST_PORT:GUEST_PORT`. A bare `PORT` expands to `PORT:PORT`. Returns "" if
+# malformed.
+def _normalize_publish(s)
+  t = str.trim(s)
+  if t == ""
+    return ""
+  end
+  idx = str.index(t, ":")
+  if idx < 0
+    if !_valid_port(t)
+      return ""
+    end
+    return t + ":" + t
+  end
+  host  = str.slice(t, 0, idx)
+  guest = str.slice(t, idx + 1, len(t))
+  if str.index(guest, ":") >= 0
+    return ""
+  end
+  if !_valid_port(host) || !_valid_port(guest)
+    return ""
+  end
+  return host + ":" + guest
+end
+
 # ---------------- File location ----------------
 def path
   return filepath.join(os.cwd(), FILENAME)
@@ -218,13 +266,13 @@ end
 # Returns a hash of resolved overrides; on validation failure, prints a
 # message and exits the process (same hard-fail semantics as the original).
 def validate(fm, backends, ai_agents, default_ai_agent)
-  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false, audio: false, audio_set: false}
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false, audio: false, audio_set: false, publish: []}
   # `description` is accepted as free-form, self-documenting metadata. yolo
   # never reads, validates, or displays it — it exists so authors can annotate
   # a Yolofile without tripping the unknown-key warning below. It lives in
   # `known` only (intentionally absent from `out`): there is no behaviour
   # attached to it.
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "audio" => true, "description" => true}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "audio" => true, "publish" => true, "description" => true}
   for k in fm
     if known[k] != true
       _warn("Yolofile: ignoring unknown front matter key '#{k}'")
@@ -314,6 +362,21 @@ def validate(fm, backends, ai_agents, default_ai_agent)
     else
       _err("Yolofile: invalid 'audio' value: '#{v_audio}' (expected true/false)")
       os.exit(2)
+    end
+  end
+  v_publish = fm["publish"]
+  if v_publish != nil && v_publish != ""
+    # Front matter can't express lists, so accept a comma-separated value:
+    #   publish: 8080, 8443:443
+    for part in str.split(v_publish, ",")
+      if str.trim(part) != ""
+        spec = _normalize_publish(part)
+        if spec == ""
+          _err("Yolofile: invalid 'publish' value: '#{str.trim(part)}' (expected [HOST:]GUEST ports 1-65535, comma-separated)")
+          os.exit(2)
+        end
+        out.publish = append(out.publish, spec)
+      end
     end
   end
   v_agent = fm["ai_agent"]

@@ -53,6 +53,9 @@ go version go1.26.3 linux/amd64
   visible on the other.
 - **GUI & audio (podman).** Run graphical Wayland apps with `--gui` and
   forward PipeWire/PulseAudio with `--audio`.
+- **Publish ports.** Reach a service running in the VM from the host with
+  `--publish 8080:80` (or a Yolofile `publish:` key). Bound to
+  `127.0.0.1`; works on both backends.
 - **Snapshot & share (matchlock).** `yolo export` / `yolo import` move a
   fully provisioned VM between hosts.
 - **Sensible network defaults.** Plain NAT by default with real
@@ -67,6 +70,7 @@ go version go1.26.3 linux/amd64
 | Isolation                         | KVM microVM         | Container (host kernel) |
 | State preserved across `yolo stop`| No (recreated)      | Yes (resumed)      |
 | GUI (`--gui`) / audio (`--audio`) | No                  | Yes                |
+| Publish ports (`--publish`)       | Yes                 | Yes                |
 | `yolo export` / `yolo import`     | Yes                 | No                 |
 | Egress allow-list (`YOLO_ALLOW`)  | Yes                 | No                 |
 | Required binary on `PATH`         | `matchlock`         | `podman`           |

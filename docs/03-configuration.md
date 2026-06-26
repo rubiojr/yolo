@@ -38,7 +38,7 @@ For per-project configuration that travels with the repo, use a
 | Var               | Default        | Effect |
 | ----------------- | -------------- | ------ |
 | `YOLO_IMAGE`      | `fedora:44`    | OCI image to use (any reference the active backend supports). |
-| `YOLO_BACKEND`    | `matchlock`    | Backend for new VMs: `matchlock`, `podman`, or `container`. See [Backends](./09-backends.md). |
+| `YOLO_BACKEND`    | _OS-dependent_ | Backend for new VMs: `matchlock`, `podman`, or `container`. Default is `matchlock` on Linux and `container` on macOS. See [Backends](./09-backends.md). |
 | `YOLO_CPUS`       | `2`            | vCPU count. Matchlock's stock default is 1. |
 | `YOLO_MEM_MB`     | `2048`         | Guest memory in MiB. Matchlock's stock default is 512. |
 | `YOLO_DISK_MB`    | `32768`        | Guest rootfs disk in MiB (32 GiB). Also settable per-invocation with `--disk-size`. |

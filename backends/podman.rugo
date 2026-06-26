@@ -434,6 +434,9 @@ def make
   be["PERSISTS_ON_STOP"] = true
   be["DEFAULT_IMAGE"]    = "registry.fedoraproject.org/fedora-toolbox:44"
 
+  be["preflight"] = fn()
+    # No-op: podman failures surface from the CLI directly.
+  end
   be["list_table"] = fn()
     return _list_table_impl()
   end

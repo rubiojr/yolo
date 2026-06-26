@@ -78,7 +78,8 @@ controlling TTY — the command still runs; ignore it.
   `ls -l /dev/kvm && matchlock --version`. (Skip this if you're on podman.)
 
 ```bash
-# One-step install (Fedora / Ubuntu 26.04 LTS): installs matchlock + yolo
+# One-step install: Linux (Fedora / Ubuntu 26.04 LTS) installs matchlock +
+# podman + yolo; macOS installs the yolo binary and flags Apple's `container`.
 curl -fsSL https://yolo.rbel.co/install.sh | bash
 # Or drop the prebuilt static binary on PATH
 install -m 0755 yolo ~/.local/bin/yolo
@@ -169,7 +170,7 @@ yolo -h | --help                Full help with env-var defaults.
   shell or `-- CMD` exits. Combine with `--provisioner` or `--yolofile`.
 - `--no-provision` (alias `--no-provisioner`) — skip provisioning.
 - `--ai-agent [NAME]` / `--no-ai-agent` — manage the AI agent layer.
-- `--backend NAME` / `-b` — `matchlock` (default), `podman`, or `container`.
+- `--backend NAME` / `-b` — `matchlock` (Linux default), `podman`, or `container` (macOS default).
 - `--gui` / `--no-gui` — bind-mount the host Wayland socket (podman only).
 - `--audio` / `--no-audio` — bind-mount the host PipeWire/PulseAudio socket
   so guest apps can play sound (podman only). Independent of `--gui`; a TUI
@@ -194,7 +195,7 @@ yolo -h | --help                Full help with env-var defaults.
 | `YOLO_DISK_MB`    | `32768`     | Rootfs disk (MiB, matchlock only). |
 | `YOLO_WORKSPACE`  | `/work`     | Guest mount point for `$PWD`. |
 | `YOLO_NAME`       | `cwd-<sha1>`| Override the auto-derived name. |
-| `YOLO_BACKEND`    | `matchlock` | Default backend. |
+| `YOLO_BACKEND`    | OS-dependent | Default backend (`matchlock` on Linux, `container` on macOS). |
 | `YOLO_USER`       | unset       | `--user uid:gid` for non-root exec. |
 | `YOLO_ALLOW`      | unset       | Egress allow-list → matchlock MITM mode (see Networking). |
 | `YOLO_GO_VERSION` | latest      | Pin Go in `fedora-go`. |
@@ -211,7 +212,7 @@ built-in default. A `yolo import` image pin overrides the resolved image.
 
 ## Backends: matchlock vs podman vs container
 
-| Capability                       | matchlock (default) | podman              | container (Apple, macOS) |
+| Capability                       | matchlock (Linux default) | podman              | container (macOS default) |
 | -------------------------------- | ------------------- | ------------------- | ------------------------ |
 | Host platform                    | Linux (KVM)         | Linux               | macOS (Apple silicon)    |
 | Isolation                        | KVM microVM         | container (host kernel) | per-container Linux VM |

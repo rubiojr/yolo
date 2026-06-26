@@ -29,6 +29,11 @@ via dot-access: `be = matchlock.make(); be.start(opts)`.
 ## Lifecycle
 
 ```
+be.preflight()                  -> ()          # validate the runtime is usable;
+                                                # called before the first start()
+                                                # logs anything. Should exit with a
+                                                # friendly message if the backend's
+                                                # CLI is missing/unusable. No-op is fine.
 be.list_table()                 -> {id => [status, image]}
 be.start(opts)                  -> id          # creates + boots; returns opaque id
 be.stop(id)                     -> ()          # PERSISTS_ON_STOP backends preserve state

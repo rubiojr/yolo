@@ -339,6 +339,9 @@ def make
   be["PERSISTS_ON_STOP"] = false
   be["DEFAULT_IMAGE"]    = "fedora:44"
 
+  be["preflight"] = fn()
+    # No-op: matchlock failures surface from the CLI directly.
+  end
   be["list_table"] = fn()
     return _list_table_impl()
   end

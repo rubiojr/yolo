@@ -50,7 +50,21 @@ BACKENDS = {
   "podman"    => podman.make(),
   "container" => container.make()
 }
-DEFAULT_BACKEND = "matchlock"
+
+# Default backend, chosen by host OS: matchlock (Firecracker microVMs) needs
+# KVM and only exists on Linux, so it can't be the default on macOS. There,
+# Apple's `container` is the sensible out-of-the-box backend. Any explicit
+# selection (sticky <name>.backend, --backend, YOLO_BACKEND, Yolofile
+# `backend:`) still wins over this — see resolve_backend_name().
+def detect_default_backend
+  out = try `uname -s` or ""
+  sys = str.trim(out)
+  if sys == "Darwin"
+    return "container"
+  end
+  return "matchlock"
+end
+DEFAULT_BACKEND = detect_default_backend()
 
 # ---------------- Embedded provisioners ----------------
 # Each provisioner is a plain bash script that runs INSIDE the guest VM as
@@ -365,6 +379,10 @@ end
 # Start a fresh VM bound to $name. Returns the new vm-id.
 def start_vm(name)
   be = backend_for(name)
+  # Fail fast (before any logging/state) if the backend's runtime CLI isn't
+  # usable — e.g. Apple's `container` not installed. No-op for backends that
+  # don't need a preflight.
+  be.preflight()
   # Refuse incompatible combinations before touching state or logging.
   if gui_enabled && be.SUPPORTS_GUI == false
     err_("backend '#{be.NAME}' does not support GUI mode (use --backend podman)")

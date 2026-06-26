@@ -15,7 +15,8 @@ action that needs a running VM, `yolo`:
 
 1. Reads the stored id from `$XDG_RUNTIME_DIR/yolo/<name>.vmid`.
 2. Resolves the backend from `<name>.backend` (sticky once set; falls
-   back to `matchlock` for pre-existing state).
+   back to the OS default — `matchlock` on Linux, `container` on macOS —
+   for pre-existing state).
 3. Calls the backend's `list_table()` and looks up the row.
 4. If status is `running` → reuse the VM.
 5. If status is non-running **and** the backend's `PERSISTS_ON_STOP` flag
@@ -46,8 +47,9 @@ VM (`yolo`, `yolo --`, `yolo provision`, `yolo export`), so a
 ```
 
 `<name>.backend` was added when the second backend landed. If it's
-missing, yolo treats the binding as matchlock-owned (the original
-behaviour), so existing state keeps working seamlessly.
+missing, yolo treats the binding as owned by the OS default backend
+(`matchlock` on Linux — the original behaviour — and `container` on
+macOS), so existing state keeps working seamlessly.
 
 The `.applied` marker contains the vm-id on the first line and the
 applied provisioner markers on subsequent lines:

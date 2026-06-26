@@ -69,25 +69,94 @@ def _sh_squote(s)
   return "'" + str.replace(s, "'", "'\\''") + "'"
 end
 
-# Build the `--dns <ip>` flags for `container run`. Reads $YOLO_CONTAINER_DNS
-# (space-separated nameservers), falling back to DEFAULT_DNS. Each nameserver
-# is validated against a strict IP-literal charset ([0-9a-fA-F:.]) before being
-# spliced into the host-side command line — the value comes from the
-# environment, so it must never be able to inject shell metacharacters.
-def _dns_args
+# Where to send users who don't have Apple's `container` CLI yet.
+CONTAINER_INSTALL_URL = "https://github.com/apple/container/releases/tag/1.0.0"
+
+# Preflight: fail early with an actionable message if the `container` binary
+# isn't on PATH. `container` is the default backend on macOS, so a fresh
+# machine without it would otherwise hit a cryptic "command not found" deep in
+# a `container run` invocation. Called at the top of every method that shells
+# out to the CLI for a user-visible action.
+def _require_container_cli
+  out = try `bash -c "command -v container >/dev/null 2>&1 && echo yes"` or ""
+  if str.trim(out) != "yes"
+    _err("Apple's `container` CLI was not found on PATH.")
+    _err("The 'container' backend needs it — install the latest release from:")
+    _err("  #{CONTAINER_INSTALL_URL}")
+    _err("then start the service with `container system start`.")
+    _err("(On Linux, use `--backend matchlock` or `--backend podman` instead.)")
+    os.exit(127)
+  end
+end
+
+# Validated nameserver list. Reads $YOLO_CONTAINER_DNS (space-separated),
+# falling back to DEFAULT_DNS. Each entry is validated against a strict
+# IP-literal charset ([0-9a-fA-F:.]) — the value comes from the environment, so
+# it must never be able to inject shell metacharacters into the host command
+# line or the in-guest resolv.conf we write.
+def _dns_list
   raw = os.getenv("YOLO_CONTAINER_DNS")
   if raw == ""
     raw = DEFAULT_DNS
   end
-  args = ""
+  out = []
   for ns in str.fields(raw)
     if _valid_ip(ns)
-      args = args + "--dns " + ns + " "
+      out = append(out, ns)
     else
       _warn("ignoring invalid YOLO_CONTAINER_DNS entry '#{ns}' (not an IP literal)")
     end
   end
+  if len(out) == 0
+    out = append(out, DEFAULT_DNS)
+  end
+  return out
+end
+
+# Build the `--dns <ip>` flags for `container run`.
+def _dns_args
+  args = ""
+  for ns in _dns_list()
+    args = args + "--dns " + ns + " "
+  end
   return args
+end
+
+# Bash snippet prepended to every provisioner run. It fixes the two ways Apple's
+# `container` networking bites a live-provisioned Fedora guest:
+#
+#  1. DNS. A `container` VM's resolver is fixed at *create* time and cannot be
+#     reconfigured on an existing container (the same trap `oc` documents for
+#     its persistent builder). Because yolo PERSISTS and reuses containers, a
+#     container created/resumed without a working `--dns` keeps a dead resolver
+#     forever. So rather than trust create-time `--dns` alone, we self-heal:
+#     if an external name can't be resolved, rewrite /etc/resolv.conf with our
+#     nameserver(s). On a freshly `--dns`-created container the lookup already
+#     works and we leave resolv.conf untouched.
+#  2. IPv6. The VM has no working IPv6 egress, so dnf otherwise resolves a
+#     mirror's AAAA record, tries the dead IPv6 route and stalls. Force IPv4
+#     (`ip_resolve=4`), mirroring what `oc` bakes into its image.
+#
+# Runs before the provisioner's own `set -euo pipefail`, so the `|| true`-
+# guarded steps here can't abort it; idempotent; persists across stop.
+def _provision_prelude
+  # Build the resolv.conf rewrite as plain `echo` lines (no printf/%-format:
+  # rugo's "#{}" interpolation runs through Sprintf, so a literal % would be
+  # mis-parsed as a verb). IPs are charset-validated, so they're safe to splice
+  # into single-quoted echo arguments.
+  probe = "registry.fedoraproject.org"
+  writes = "  : > /etc/resolv.conf 2>/dev/null || true\n"
+  for ns in _dns_list()
+    writes = writes + "  echo 'nameserver " + ns + "' >> /etc/resolv.conf 2>/dev/null || true\n"
+  end
+  return "" +
+    "if ! getent hosts " + probe + " >/dev/null 2>&1; then\n" +
+    writes +
+    "fi\n" +
+    "if command -v dnf >/dev/null 2>&1; then\n" +
+    "  mkdir -p /etc/dnf 2>/dev/null || true\n" +
+    "  grep -qs '^ip_resolve=' /etc/dnf/dnf.conf 2>/dev/null || echo 'ip_resolve=4' >> /etc/dnf/dnf.conf\n" +
+    "fi\n"
 end
 
 # True when `s` is a plausible, shell-safe IPv4/IPv6 literal: non-empty and made
@@ -352,6 +421,7 @@ end
 
 # ---------------- logs ----------------
 def _logs_impl(id, extra)
+  _require_container_cli()
   extra_str = str.join(extra, " ")
   bash -c "container logs #{extra_str} #{id}"
 end
@@ -360,17 +430,23 @@ end
 # Provisioning runs as root regardless of the container's default user, so we
 # explicitly --user 0. Mirrors podman's `--user 0` / matchlock's `-u root`.
 def _exec_provision_impl(id, src, workspace)
+  _require_container_cli()
   tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
-  os.write_file(tmp, src)
+  # Prepend the network self-heal prelude (resolv.conf + dnf IPv4) so a reused
+  # or stale container with a dead resolver still provisions. See
+  # _provision_prelude for the full rationale.
+  os.write_file(tmp, _provision_prelude() + src)
   bash -c "cat #{tmp} | container exec -i --user 0 -w #{workspace} #{id} bash"
   os.remove(tmp)
 end
 
 def _exec_shell_impl(id, workspace, tty)
+  _require_container_cli()
   bash -c "container exec #{tty} -w #{workspace} #{id} bash -l"
 end
 
 def _exec_argv_impl(id, workspace, tty, argv)
+  _require_container_cli()
   # Same temp-script idiom as the podman/matchlock backends — see
   # backends/matchlock.rugo for the full justification of why the whole
   # invocation is written to a script rather than spliced inline (rugo's
@@ -416,6 +492,9 @@ def make
   be["PERSISTS_ON_STOP"] = true
   be["DEFAULT_IMAGE"]    = "registry.fedoraproject.org/fedora:44"
 
+  be["preflight"] = fn()
+    _require_container_cli()
+  end
   be["list_table"] = fn()
     return _list_table_impl()
   end

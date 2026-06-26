@@ -42,7 +42,10 @@ first match wins:
    `NAME` is one of `matchlock`, `podman`, `container`.
 3. **`YOLO_BACKEND=NAME` env var.** Useful as a per-shell default.
 4. **`backend: NAME` in Yolofile front matter.** Project-local default.
-5. **Built-in default: `matchlock`.**
+5. **Built-in default, by host OS:** `matchlock` on Linux, `container` on
+   macOS. (matchlock needs KVM and doesn't exist on macOS, so yolo picks
+   Apple's `container` there automatically. Any of the explicit selections
+   above still override this.)
 
 To migrate an existing binding to a different backend, you must
 `yolo rm -n NAME` first.
@@ -74,7 +77,10 @@ To migrate an existing binding to a different backend, you must
 - The `container` system service must be running first
   (`container system start`); yolo expects the `container` binary on
   `$PATH`, exactly as it expects `podman` or `matchlock` for those
-  backends.
+  backends. Install it from the
+  [latest release](https://github.com/apple/container/releases/tag/1.0.0).
+  If the CLI is missing, yolo fails fast with that install link rather than
+  a cryptic error.
 
 Notes and current limitations of the container backend:
 
@@ -88,12 +94,25 @@ Notes and current limitations of the container backend:
 - `YOLO_CPUS` and `YOLO_MEM_MB` **are** honoured (the per-container VM gets
   its own CPU/RAM allocation — the default 1 GiB is too small for real
   provisioning). `YOLO_DISK_MB` is ignored.
-- **DNS is injected automatically.** Apple's `container` gives each VM a
-  per-VM resolver (the vmnet gateway) that does not resolve external names,
-  so yolo passes `--dns 1.1.1.1` on `container run` — otherwise the guest
-  has no working DNS and `dnf`/`curl`/`git` fail during provisioning.
-  Override the nameserver(s) with `YOLO_CONTAINER_DNS` (space-separated,
-  e.g. `YOLO_CONTAINER_DNS="1.1.1.1 8.8.8.8"`).
+- **DNS / networking is fixed up automatically.** Apple's `container` gives
+  each VM a per-VM resolver (the vmnet gateway) that does not resolve
+  external names, *and* the VM has no working IPv6 egress. yolo handles both:
+  - it passes `--dns 1.1.1.1` on `container run` (override with
+    `YOLO_CONTAINER_DNS`, space-separated, e.g.
+    `YOLO_CONTAINER_DNS="1.1.1.1 8.8.8.8"`), and
+  - before each provisioner runs it **self-heals the resolver in-guest** —
+    if an external name still can't be resolved (e.g. on a container that
+    was created/resumed *before* the right `--dns`), it rewrites
+    `/etc/resolv.conf` with the configured nameserver(s) — and forces
+    Fedora's `dnf` onto IPv4 (`ip_resolve=4`) so dnf doesn't stall on the
+    dead IPv6 route.
+
+  > A `container`'s DNS is fixed at **create** time and can't be
+  > reconfigured on an existing container — the same reason Apple's own
+  > tooling recreates a stale builder. Because yolo *persists and reuses*
+  > containers, the self-heal step above is what makes a container created
+  > before a DNS change start resolving again without a manual
+  > `yolo rm`/recreate.
 
 
 ## GUI mode (`--gui`)

@@ -34,11 +34,11 @@ Each `$PWD` gets a long-lived VM keyed by `cwd-<sha1(path)[:10]>`.
 Re-running `yolo` reattaches in <1s. yolo auto-heals (recreates a gone
 VM), auto-detects a language provisioner from project files, live-mounts
 `$PWD` at `/work`, and can snapshot/restore a VM via `export`/`import`.
-Three backends exist: **matchlock** (Firecracker microVMs, default),
-**podman** (containers, GUI-capable) and **container** (Apple's
-`container`, per-container Linux VMs on macOS). The host binary is a single
-static rugo artifact; nothing rugo/Go is needed in the guest (provisioners
-are bash).
+Three backends exist: **matchlock** (Firecracker microVMs, default on
+Linux), **podman** (containers, GUI-capable) and **container** (Apple's
+`container`, per-container Linux VMs, default on macOS). The host binary is
+a single static rugo artifact; nothing rugo/Go is needed in the guest
+(provisioners are bash).
 
 ## Source layout
 
@@ -139,7 +139,7 @@ Per-name state lives in `$XDG_RUNTIME_DIR/yolo/` (fallback `/tmp/yolo/`):
 
 ```
 <name>.vmid      # opaque backend id bound to this name
-<name>.backend   # owning backend (matchlock|podman|container); missing => matchlock
+<name>.backend   # owning backend (matchlock|podman|container); missing => OS default (matchlock on Linux, container on macOS)
 <name>.applied   # line 1 = vm-id; subsequent lines = applied markers
 <name>.cwd       # host cwd recorded at first attach (for `ls` display)
 <name>.image     # per-name image pin (set by `yolo import`)
@@ -185,8 +185,8 @@ Read `backends/INTERFACE.md` first. Then:
 
 1. Create `backends/<name>.rugo` with a `make()` returning a handle that
    implements every constant (`NAME`, `SUPPORTS_GUI`, `SUPPORTS_EXPORT`,
-   `PERSISTS_ON_STOP`, `DEFAULT_IMAGE`) and method (`start`, `stop`,
-   `resume`, `remove`, `wait_ready`, `list_table`, `logs`,
+   `PERSISTS_ON_STOP`, `DEFAULT_IMAGE`) and method (`preflight`, `start`,
+   `stop`, `resume`, `remove`, `wait_ready`, `list_table`, `logs`,
    `exec_provision`, `exec_shell`, `exec_argv`, `disk_apparent`,
    `disk_real`, `image_remove`, plus the export trio when
    `SUPPORTS_EXPORT`).

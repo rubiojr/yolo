@@ -3,14 +3,17 @@
 Fast, persistent, per-directory dev environments with one-shot
 provisioning. Written in [rugo][rugo].
 
-`yolo` ships with two interchangeable backends:
+`yolo` ships with three interchangeable backends:
 
-- **[matchlock][matchlock]** (default) — Firecracker microVMs with
+- **[matchlock][matchlock]** (default on Linux) — Firecracker microVMs with
   KVM-level isolation.
 - **podman** — host-kernel containers, faster to boot, with GUI/audio
   passthrough.
+- **[container][apple-container]** (default on macOS) — Apple's `container`,
+  Linux containers in lightweight per-container VMs.
 
 [matchlock]: https://github.com/jingkaihe/matchlock
+[apple-container]: https://github.com/apple/container
 [rugo]: https://github.com/rubiojr/rugo
 
 ```
@@ -66,15 +69,15 @@ go version go1.26.3 linux/amd64
 
 ## Backends at a glance
 
-| Capability                        | matchlock (default) | podman             |
-| --------------------------------- | ------------------- | ------------------ |
-| Isolation                         | KVM microVM         | Container (host kernel) |
-| State preserved across `yolo stop`| No (recreated)      | Yes (resumed)      |
-| GUI (`--gui`) / audio (`--audio`) | No                  | Yes                |
-| Publish ports (`--publish`)       | Yes                 | Yes                |
-| `yolo export` / `yolo import`     | Yes                 | No                 |
-| Egress allow-list (`YOLO_ALLOW`)  | Yes                 | No                 |
-| Required binary on `PATH`         | `matchlock`         | `podman`           |
+| Capability                        | matchlock (Linux default) | podman             | container (macOS default) |
+| --------------------------------- | ------------------- | ------------------ | ------------------------- |
+| Isolation                         | KVM microVM         | Container (host kernel) | Per-container Linux VM |
+| State preserved across `yolo stop`| No (recreated)      | Yes (resumed)      | Yes (resumed)             |
+| GUI (`--gui`) / audio (`--audio`) | No                  | Yes                | No                        |
+| Publish ports (`--publish`)       | Yes                 | Yes                | Yes                       |
+| `yolo export` / `yolo import`     | Yes                 | No                 | No                        |
+| Egress allow-list (`YOLO_ALLOW`)  | Yes                 | No                 | No                        |
+| Required binary on `PATH`         | `matchlock`         | `podman`           | `container`               |
 
 Full details: [`docs/09-backends.md`](./docs/09-backends.md).
 
@@ -87,7 +90,8 @@ Full details: [`docs/09-backends.md`](./docs/09-backends.md).
   needed).
 - **container backend (macOS):** Apple's
   [`container`](https://github.com/apple/container) on `PATH` with its
-  system service started (`container system start`).
+  system service started (`container system start`). Install it from the
+  [latest release](https://github.com/apple/container/releases/tag/1.0.0).
 - For end users: just the prebuilt `yolo` binary (~2 MB static; no
   other runtime deps — provisioners are plain bash run inside the
   guest).
@@ -96,7 +100,9 @@ Full details: [`docs/09-backends.md`](./docs/09-backends.md).
 ## Install
 
 ```bash
-# One-step install on Fedora or Ubuntu 26.04 LTS (matchlock + yolo)
+# One-step install:
+#   - Linux (Fedora / Ubuntu 26.04 LTS): installs matchlock + podman + yolo
+#   - macOS: installs the yolo binary and flags Apple's `container` if missing
 curl -fsSL https://yolo.rbel.co/install.sh | bash
 
 # From source

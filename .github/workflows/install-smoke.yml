@@ -14,12 +14,14 @@ on:
       - 'web/install.sh'
       - 'scripts/verify-install.sh'
       - 'scripts/verify-install-ubuntu.sh'
+      - 'scripts/verify-install-macos.sh'
       - '.github/workflows/install-smoke.yml'
   pull_request:
     paths:
       - 'web/install.sh'
       - 'scripts/verify-install.sh'
       - 'scripts/verify-install-ubuntu.sh'
+      - 'scripts/verify-install-macos.sh'
       - '.github/workflows/install-smoke.yml'
 
 permissions:
@@ -47,6 +49,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # verify-util.sh rebuilds yolo from yolo.rugo and uses *that* binary for
+      # the in-guest smoke tests (so the working-tree code is exercised, not the
+      # published release). rugo is therefore required on the runner.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Install rugo
+        run: |
+          go install github.com/rubiojr/rugo@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Enable rw access to /dev/kvm
         run: |
@@ -88,3 +104,29 @@ jobs:
             /tmp/yolo-verify-*/serial.log
             /tmp/yolo-verify-ubuntu-*/serial.log
           if-no-files-found: ignore
+
+  # macOS verification runs directly on the runner (the macOS runner *is* the
+  # target — no nested VM, unlike the Linux verifies). It builds a darwin yolo
+  # from the working tree, serves it as a local file:// "release", and runs
+  # install.sh against it, so it doesn't depend on a published darwin release.
+  smoke-macos:
+    name: Verify install.sh (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Install rugo
+        run: |
+          go install github.com/rubiojr/rugo@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run macOS verification
+        run: bash scripts/verify-install-macos.sh

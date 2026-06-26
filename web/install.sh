@@ -39,6 +39,12 @@ set -euo pipefail
 # ---------------- Configuration ----------------
 YOLO_REPO="${YOLO_REPO:-rubiojr/yolo}"
 YOLO_VERSION="${YOLO_VERSION:-}"                    # empty = latest
+# Base URL the yolo binary + .sha256 are fetched from. Normally derived from
+# YOLO_REPO/YOLO_VERSION to point at GitHub Releases; override it to install
+# from a mirror or a local "release" (e.g. file:///path or http://host:port)
+# — used by scripts/verify-install-macos.sh to test against a locally-built
+# binary without a published release. The github default stays https-only.
+YOLO_BASE_URL="${YOLO_BASE_URL:-}"
 # matchlock is pinned to a known-good release for reproducible installs.
 # Bump this after verifying yolo still works against the new release
 # (see release notes at https://github.com/jingkaihe/matchlock/releases).
@@ -437,17 +443,28 @@ else
 fi
 
 # ---------------- Resolve yolo download URL ----------------
+# A pre-set $YOLO_BASE_URL (mirror / local release) wins; otherwise derive the
+# GitHub Releases URL from YOLO_REPO/YOLO_VERSION.
 if [ -n "$YOLO_VERSION" ]; then
   case "$YOLO_VERSION" in
     v*) YOLO_TAG="$YOLO_VERSION" ;;
     *)  YOLO_TAG="v$YOLO_VERSION" ;;
   esac
-  YOLO_BASE_URL="https://github.com/${YOLO_REPO}/releases/download/${YOLO_TAG}"
+  : "${YOLO_BASE_URL:=https://github.com/${YOLO_REPO}/releases/download/${YOLO_TAG}}"
   YOLO_LABEL="$YOLO_TAG"
 else
-  YOLO_BASE_URL="https://github.com/${YOLO_REPO}/releases/latest/download"
+  : "${YOLO_BASE_URL:=https://github.com/${YOLO_REPO}/releases/latest/download}"
   YOLO_LABEL="latest"
 fi
+
+# Restrict curl to the base URL's scheme. The default (GitHub) is https-only;
+# an explicit mirror/local override may legitimately be http:// or file://.
+case "$YOLO_BASE_URL" in
+  https://*) YOLO_DL_PROTO='=https' ;;
+  http://*)  YOLO_DL_PROTO='=http' ;;
+  file://*)  YOLO_DL_PROTO='=file' ;;
+  *)         YOLO_DL_PROTO='=https' ;;
+esac
 
 YOLO_ASSET="yolo-${YOLO_OS}-${ARCH}"
 YOLO_URL="${YOLO_BASE_URL}/${YOLO_ASSET}"
@@ -460,7 +477,7 @@ mkdir -p "$YOLO_PREFIX"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-if ! curl -fL --proto '=https' --tlsv1.2 \
+if ! curl -fL --proto "$YOLO_DL_PROTO" --tlsv1.2 \
       --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
       -o "$TMP/$YOLO_ASSET" "$YOLO_URL"; then
   die "failed to download $YOLO_URL — does a release exist for ${YOLO_LABEL} (${YOLO_OS}/${ARCH})?"
@@ -469,7 +486,7 @@ fi
 # Checksum verification: required by default for the official repo so a
 # silently-broken release can't ship an unverified binary. Opt-out exists for
 # forks / dev tags via --allow-missing-checksum.
-if curl -fsSL -o "$TMP/$YOLO_ASSET.sha256" "$YOLO_SHA_URL" 2>/dev/null; then
+if curl -fsSL --proto "$YOLO_DL_PROTO" -o "$TMP/$YOLO_ASSET.sha256" "$YOLO_SHA_URL" 2>/dev/null; then
   log "Verifying SHA-256 checksum"
   set +e
   sha256_verify "$TMP" "$YOLO_ASSET"

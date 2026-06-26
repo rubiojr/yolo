@@ -169,7 +169,7 @@ yolo -h | --help                Full help with env-var defaults.
   shell or `-- CMD` exits. Combine with `--provisioner` or `--yolofile`.
 - `--no-provision` (alias `--no-provisioner`) — skip provisioning.
 - `--ai-agent [NAME]` / `--no-ai-agent` — manage the AI agent layer.
-- `--backend NAME` / `-b` — `matchlock` (default) or `podman`.
+- `--backend NAME` / `-b` — `matchlock` (default), `podman`, or `container`.
 - `--gui` / `--no-gui` — bind-mount the host Wayland socket (podman only).
 - `--audio` / `--no-audio` — bind-mount the host PipeWire/PulseAudio socket
   so guest apps can play sound (podman only). Independent of `--gui`; a TUI
@@ -209,24 +209,30 @@ YOLO_IMAGE=registry.fedoraproject.org/fedora:41 yolo
 Precedence (high→low): CLI flag > Yolofile front matter > `$YOLO_*` env >
 built-in default. A `yolo import` image pin overrides the resolved image.
 
-## Backends: matchlock vs podman
+## Backends: matchlock vs podman vs container
 
-| Capability                       | matchlock (default) | podman              |
-| -------------------------------- | ------------------- | ------------------- |
-| Isolation                        | KVM microVM         | container (host kernel) |
-| State across `yolo stop`         | **lost** (recreate) | **preserved** (resume) |
-| GUI apps (Wayland, `--gui`)      | no                  | yes                 |
-| Audio (`--audio`)                | no                  | yes                 |
-| Publish ports (`--publish`)      | yes                 | yes                 |
-| `export` / `import`              | yes                 | no                  |
-| `YOLO_ALLOW` egress allow-list   | yes                 | ignored             |
-| `YOLO_DISK_MB` cap               | yes                 | ignored (host fs)   |
-| Default image                    | `fedora:44`         | `fedora-toolbox:44` |
+| Capability                       | matchlock (default) | podman              | container (Apple, macOS) |
+| -------------------------------- | ------------------- | ------------------- | ------------------------ |
+| Host platform                    | Linux (KVM)         | Linux               | macOS (Apple silicon)    |
+| Isolation                        | KVM microVM         | container (host kernel) | per-container Linux VM |
+| State across `yolo stop`         | **lost** (recreate) | **preserved** (resume) | **preserved** (resume) |
+| GUI apps (Wayland, `--gui`)      | no                  | yes                 | no                       |
+| Audio (`--audio`)                | no                  | yes                 | no                       |
+| Publish ports (`--publish`)      | yes                 | yes                 | yes                      |
+| `export` / `import`              | yes                 | no                  | no                       |
+| `YOLO_ALLOW` egress allow-list   | yes                 | ignored             | ignored                  |
+| `YOLO_CPUS` / `YOLO_MEM_MB`      | yes                 | ignored (host)      | yes (per-VM)             |
+| `YOLO_DISK_MB` cap               | yes                 | ignored (host fs)   | ignored                  |
+| `yolo du` disk accounting        | yes                 | yes                 | no (unknown)             |
+| Default image                    | `fedora:44`         | `fedora-toolbox:44` | `fedora:44`              |
+| Required binary on `PATH`        | `matchlock`         | `podman`            | `container`              |
 
 The backend is **sticky**: once a VM is created the choice is recorded; to
 switch, `yolo rm -n NAME` first, then re-attach with the new backend. Pick
 podman when you need GUI apps or stop-to-preserve state; pick matchlock for
-kernel-level isolation, export/import, or egress allow-listing.
+kernel-level isolation, export/import, or egress allow-listing; pick
+container on macOS to get yolo dev VMs via Apple's `container` (its system
+service must be started first: `container system start`).
 
 ```bash
 yolo --backend podman --gui -- gnome-text-editor

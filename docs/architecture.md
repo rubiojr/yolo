@@ -10,7 +10,7 @@ the backend capability matrix and selection rules, see
 ## 1. Auto-heal
 
 `yolo`'s state file points at an opaque per-name id (a `vm-xxxx` for
-matchlock, a `yolo-<binding>` container name for podman). Before every
+matchlock, a `yolo-<binding>` container name for podman and container). Before every
 action that needs a running VM, `yolo`:
 
 1. Reads the stored id from `$XDG_RUNTIME_DIR/yolo/<name>.vmid`.
@@ -19,7 +19,7 @@ action that needs a running VM, `yolo`:
 3. Calls the backend's `list_table()` and looks up the row.
 4. If status is `running` → reuse the VM.
 5. If status is non-running **and** the backend's `PERSISTS_ON_STOP` flag
-   is true (podman) → call the backend's `resume()` and reattach.
+   is true (podman, container) → call the backend's `resume()` and reattach.
 6. If status is non-running **and** the backend doesn't persist on stop
    (matchlock) → `remove()` and start a fresh VM with the same name.
 7. If the row is missing → drop the stored id and start a fresh VM.
@@ -39,7 +39,7 @@ VM (`yolo`, `yolo --`, `yolo provision`, `yolo export`), so a
 
 ```
 <name>.vmid       # opaque backend id currently bound to this name
-<name>.backend    # backend that owns this binding (matchlock | podman)
+<name>.backend    # backend that owns this binding (matchlock | podman | container)
 <name>.applied    # vm-id + provisioner marker(s) already applied
 <name>.cwd        # host cwd recorded at first attach (for display)
 <name>.image      # per-name image pin (set by `yolo import`)
@@ -114,6 +114,7 @@ backend's `exec_provision` channel:
 
 - matchlock: `matchlock exec <vm> -i -u root -- bash`
 - podman:    `podman exec -i --user 0 <container> bash`
+- container: `container exec -i --user 0 <container> bash`
 
 The script's stdin is the script bytes; stdout/stderr stream back to
 the user's terminal.
@@ -166,11 +167,12 @@ and — only when `SUPPORTS_EXPORT` — `export_archive`, `import_unpack`,
 `yolo.rugo` builds a registry at startup:
 
 ```ruby
-require "backends" with matchlock, podman
+require "backends" with matchlock, podman, container
 
 BACKENDS = {
   "matchlock" => matchlock.make(),
-  "podman"    => podman.make()
+  "podman"    => podman.make(),
+  "container" => container.make()
 }
 ```
 
@@ -204,6 +206,7 @@ backends/
     yolo-import-unpack.sh                       # embedded at build time
     yolo-import-retag.sh
   podman.rugo                                   # podman (container) backend
+  container.rugo                                # Apple `container` backend (macOS)
 provisioners/
   provisioner-fedora-go.sh                      # backend-agnostic, run in guest
   provisioner-fedora-rust.sh

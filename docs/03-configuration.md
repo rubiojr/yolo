@@ -38,7 +38,7 @@ For per-project configuration that travels with the repo, use a
 | Var               | Default        | Effect |
 | ----------------- | -------------- | ------ |
 | `YOLO_IMAGE`      | `fedora:44`    | OCI image to use (any reference the active backend supports). |
-| `YOLO_BACKEND`    | `matchlock`    | Backend for new VMs: `matchlock` or `podman`. See [Backends](./09-backends.md). |
+| `YOLO_BACKEND`    | `matchlock`    | Backend for new VMs: `matchlock`, `podman`, or `container`. See [Backends](./09-backends.md). |
 | `YOLO_CPUS`       | `2`            | vCPU count. Matchlock's stock default is 1. |
 | `YOLO_MEM_MB`     | `2048`         | Guest memory in MiB. Matchlock's stock default is 512. |
 | `YOLO_DISK_MB`    | `32768`        | Guest rootfs disk in MiB (32 GiB). Also settable per-invocation with `--disk-size`. |
@@ -61,10 +61,10 @@ For per-project configuration that travels with the repo, use a
     [Daily usage § Multiple persistent VMs](./02-usage.md#23-multiple-persistent-vms).
 
 `--backend NAME`
-:   Select the backend (`matchlock` or `podman`) for a **new** VM.
-    Overrides `YOLO_BACKEND` and a Yolofile `backend:`. The choice is
-    recorded per-VM and becomes sticky — to switch an existing VM,
-    `yolo rm` it first. See [Backends](./09-backends.md).
+:   Select the backend (`matchlock`, `podman`, or `container`) for a
+    **new** VM. Overrides `YOLO_BACKEND` and a Yolofile `backend:`. The
+    choice is recorded per-VM and becomes sticky — to switch an existing
+    VM, `yolo rm` it first. See [Backends](./09-backends.md).
 
 `--gui` / `--audio`
 :   Forward the host Wayland socket (`--gui`) or PipeWire/PulseAudio

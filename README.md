@@ -34,10 +34,11 @@ go version go1.26.3 linux/amd64
 - **Per-directory persistent environments.** Each `$PWD` gets its own
   long-lived VM (or container), keyed by a sha1 of the path. Re-running
   `yolo` reattaches in under a second.
-- **Two backends, one CLI.** Pick microVM isolation (`matchlock`) or fast
-  host-kernel containers (`podman`) with `--backend`, `YOLO_BACKEND`, or
-  `backend:` in a Yolofile. The choice is recorded per-VM so subsequent
-  attaches always reach the right runtime.
+- **Three backends, one CLI.** Pick microVM isolation (`matchlock`), fast
+  host-kernel containers (`podman`), or Apple's `container` (per-container
+  Linux VMs on macOS) with `--backend`, `YOLO_BACKEND`, or `backend:` in a
+  Yolofile. The choice is recorded per-VM so subsequent attaches always
+  reach the right runtime.
 - **Auto-heal.** If the VM was stopped or removed (host reboot, manual
   `matchlock rm` / `podman rm`, …) `yolo` notices and recreates or resumes
   it transparently.
@@ -79,11 +80,14 @@ Full details: [`docs/09-backends.md`](./docs/09-backends.md).
 
 ## Requirements
 
-- Linux.
+- Linux (matchlock, podman) or macOS / Apple silicon (container).
 - **matchlock backend:** KVM (`/dev/kvm` readable and writable) and
   [`matchlock`](https://github.com/jingkaihe/matchlock#install) on `PATH`.
 - **podman backend:** [`podman`](https://podman.io/) on `PATH` (no KVM
   needed).
+- **container backend (macOS):** Apple's
+  [`container`](https://github.com/apple/container) on `PATH` with its
+  system service started (`container system start`).
 - For end users: just the prebuilt `yolo` binary (~2 MB static; no
   other runtime deps — provisioners are plain bash run inside the
   guest).

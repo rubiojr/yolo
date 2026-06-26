@@ -34,10 +34,11 @@ Each `$PWD` gets a long-lived VM keyed by `cwd-<sha1(path)[:10]>`.
 Re-running `yolo` reattaches in <1s. yolo auto-heals (recreates a gone
 VM), auto-detects a language provisioner from project files, live-mounts
 `$PWD` at `/work`, and can snapshot/restore a VM via `export`/`import`.
-Two backends exist: **matchlock** (Firecracker microVMs, default) and
-**podman** (containers, GUI-capable). The host binary is a single static
-rugo artifact; nothing rugo/Go is needed in the guest (provisioners are
-bash).
+Three backends exist: **matchlock** (Firecracker microVMs, default),
+**podman** (containers, GUI-capable) and **container** (Apple's
+`container`, per-container Linux VMs on macOS). The host binary is a single
+static rugo artifact; nothing rugo/Go is needed in the guest (provisioners
+are bash).
 
 ## Source layout
 
@@ -53,6 +54,7 @@ backends/
     yolo-import-unpack.sh  # build time
     yolo-import-retag.sh
   podman.rugo        # podman (container) backend
+  container.rugo     # Apple `container` backend (macOS)
 provisioners/
   provisioner-fedora-go.sh       # backend-agnostic, run as root in guest
   provisioner-fedora-rust.sh
@@ -137,7 +139,7 @@ Per-name state lives in `$XDG_RUNTIME_DIR/yolo/` (fallback `/tmp/yolo/`):
 
 ```
 <name>.vmid      # opaque backend id bound to this name
-<name>.backend   # owning backend (matchlock|podman); missing => matchlock
+<name>.backend   # owning backend (matchlock|podman|container); missing => matchlock
 <name>.applied   # line 1 = vm-id; subsequent lines = applied markers
 <name>.cwd       # host cwd recorded at first attach (for `ls` display)
 <name>.image     # per-name image pin (set by `yolo import`)
@@ -162,10 +164,10 @@ edited source no longer matches the stored marker. Yolofiles hash only the
 
 Before any action needing a running VM: read stored id → resolve backend →
 `list_table()` lookup. `running` → reuse. Non-running **and**
-`PERSISTS_ON_STOP` (podman) → `resume()`. Non-running **and** not
+`PERSISTS_ON_STOP` (podman, container) → `resume()`. Non-running **and** not
 persistent (matchlock) → `remove()` + fresh `start_vm`. Missing row → drop
 id + fresh start. This makes every entry point idempotent after reboots /
-manual `matchlock rm` / `podman rm`.
+manual `matchlock rm` / `podman rm` / `container rm`.
 
 ## Locking
 

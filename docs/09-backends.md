@@ -1,27 +1,32 @@
 # Backends
 
-`yolo` ships with two backends: **matchlock** (Firecracker microVMs) and
-**podman** (containers). They share the same CLI surface and provisioner
-model; differences in capability are summarised below.
+`yolo` ships with three backends: **matchlock** (Firecracker microVMs),
+**podman** (Linux containers) and **container** (Apple's `container`, which
+runs Linux containers in lightweight per-container VMs on macOS). They share
+the same CLI surface and provisioner model; differences in capability are
+summarised below.
 
 For the internal contract that every backend must implement, see
 [`backends/INTERFACE.md`](../backends/INTERFACE.md).
 
 ## Capability matrix
 
-| Capability                          | matchlock        | podman                        |
-| ----------------------------------- | ---------------- | ----------------------------- |
-| Isolation                           | KVM microVM      | Container (host kernel)       |
-| Boot time (post first pull)         | ~1–2 s           | <1 s                          |
-| In-guest state across `yolo stop`   | **Not preserved** (recreate on next attach) | **Preserved** (resume on next attach) |
-| GUI apps (Wayland)                  | No               | Yes (`--gui`)                 |
-| Audio (PipeWire/PulseAudio)         | No               | Yes (`--audio`)               |
-| Publish guest ports (`--publish`)   | Yes              | Yes                           |
-| `yolo export` / `yolo import`       | Yes              | No                            |
-| Egress allow-list (`YOLO_ALLOW`)    | Yes (MITM proxy) | Ignored                       |
-| Disk size cap (`YOLO_DISK_MB`)      | Yes              | Ignored (uses host fs)        |
-| Default image                       | `fedora:44`      | `registry.fedoraproject.org/fedora-toolbox:44` |
-| Required external binary on `$PATH` | `matchlock`      | `podman`                      |
+| Capability                          | matchlock        | podman                        | container (Apple)             |
+| ----------------------------------- | ---------------- | ----------------------------- | ----------------------------- |
+| Host platform                       | Linux (KVM)      | Linux                         | macOS (Apple silicon)         |
+| Isolation                           | KVM microVM      | Container (host kernel)       | Per-container Linux VM        |
+| Boot time (post first pull)         | ~1–2 s           | <1 s                          | ~1–2 s                        |
+| In-guest state across `yolo stop`   | **Not preserved** (recreate on next attach) | **Preserved** (resume on next attach) | **Preserved** (resume on next attach) |
+| GUI apps (Wayland)                  | No               | Yes (`--gui`)                 | No                            |
+| Audio (PipeWire/PulseAudio)         | No               | Yes (`--audio`)               | No                            |
+| Publish guest ports (`--publish`)   | Yes              | Yes                           | Yes                           |
+| `yolo export` / `yolo import`       | Yes              | No                            | No                            |
+| Egress allow-list (`YOLO_ALLOW`)    | Yes (MITM proxy) | Ignored                       | Ignored                       |
+| Honours `YOLO_CPUS` / `YOLO_MEM_MB` | Yes              | Ignored (uses host)           | Yes (per-VM allocation)       |
+| Disk size cap (`YOLO_DISK_MB`)      | Yes              | Ignored (uses host fs)        | Ignored (no rootfs cap)       |
+| `yolo du` disk accounting           | Yes              | Yes                           | No (reports unknown)          |
+| Default image                       | `fedora:44`      | `registry.fedoraproject.org/fedora-toolbox:44` | `registry.fedoraproject.org/fedora:44` |
+| Required external binary on `$PATH` | `matchlock`      | `podman`                      | `container`                   |
 
 ## Selecting a backend
 
@@ -34,6 +39,7 @@ first match wins:
    regardless of overrides. This avoids accidentally talking to the wrong
    runtime for an existing VM.
 2. **`--backend NAME` CLI flag.** Wins over env + Yolofile for new VMs.
+   `NAME` is one of `matchlock`, `podman`, `container`.
 3. **`YOLO_BACKEND=NAME` env var.** Useful as a per-shell default.
 4. **`backend: NAME` in Yolofile front matter.** Project-local default.
 5. **Built-in default: `matchlock`.**
@@ -56,6 +62,33 @@ To migrate an existing binding to a different backend, you must
 - You need `yolo export` / `yolo import` to move a fully provisioned
   environment between hosts.
 - You want **egress allow-listing** via `YOLO_ALLOW`.
+
+## When to use container (Apple)
+
+- You are on **macOS** (Apple silicon) and want yolo dev VMs without
+  installing Docker Desktop or a Linux VM yourself. Apple's
+  [`container`](https://github.com/apple/container) runs each container in
+  its own lightweight Linux VM with a real kernel.
+- You want `yolo stop` to **preserve state** (it resumes via
+  `container start` on the next attach, like podman).
+- The `container` system service must be running first
+  (`container system start`); yolo expects the `container` binary on
+  `$PATH`, exactly as it expects `podman` or `matchlock` for those
+  backends.
+
+Notes and current limitations of the container backend:
+
+- **GUI and audio passthrough are not supported** (there is no Wayland or
+  PipeWire socket to forward on macOS). `--gui` / `--audio` are refused;
+  use the podman backend on Linux for those.
+- **`yolo export` / `yolo import` are not supported** (the export archive
+  format is matchlock-specific), same as podman.
+- **`yolo du` reports the disk size as unknown.** Apple's `container` does
+  not expose per-container on-disk size, so yolo cannot account for it.
+- `YOLO_CPUS` and `YOLO_MEM_MB` **are** honoured (the per-container VM gets
+  its own CPU/RAM allocation — the default 1 GiB is too small for real
+  provisioning). `YOLO_DISK_MB` is ignored.
+
 
 ## GUI mode (`--gui`)
 
@@ -133,20 +166,21 @@ yolo -- mpg123 some-file.mp3
 
 ## Stop/start semantics
 
-The two backends interpret `yolo stop` differently. The CLI is the same;
-the side effects are not.
+The backends interpret `yolo stop` differently. The CLI is the same; the
+side effects are not.
 
 ```
 yolo                  # boot or attach
-yolo stop             # matchlock: kill VM, state lost
-                      # podman:    podman stop, state preserved on disk
-yolo                  # matchlock: build a fresh VM and re-provision
-                      # podman:    podman start, instant attach
+yolo stop             # matchlock:           kill VM, state lost
+                      # podman / container:  stop, state preserved on disk
+yolo                  # matchlock:           build a fresh VM and re-provision
+                      # podman / container:  start, instant attach
 ```
 
 This shows up in `yolo status`. For matchlock, a stopped/missing VM is
-recreated transparently by the auto-heal pass. For podman, the same pass
-notices `exited` and resumes via `podman start` instead.
+recreated transparently by the auto-heal pass. For podman and container,
+the same pass notices the stopped/exited state and resumes via
+`podman start` / `container start` instead.
 
 ## Source layout
 
@@ -158,7 +192,8 @@ backends/
     yolo-export.sh         # matchlock-specific shell helpers
     yolo-import-unpack.sh  # (embedded into the binary at build time)
     yolo-import-retag.sh
-  podman.rugo              # container backend
+  podman.rugo              # container backend (Linux)
+  container.rugo           # Apple `container` backend (macOS)
 ```
 
 To add another backend, drop `backends/<name>.rugo` with a `make()`

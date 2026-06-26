@@ -35,7 +35,7 @@ use "time"
 #
 # Adding a new backend: drop a `backends/<name>.rugo` file, then add it to
 # both the `require` line below and the BACKENDS registry.
-require "backends" with matchlock, podman
+require "backends" with matchlock, podman, container
 
 # CLI parsing + help text and Yolofile parsing / front-matter validation
 # both live in sibling modules to keep this file from sprawling further.
@@ -47,7 +47,8 @@ require "yolofile"
 
 BACKENDS = {
   "matchlock" => matchlock.make(),
-  "podman"    => podman.make()
+  "podman"    => podman.make(),
+  "container" => container.make()
 }
 DEFAULT_BACKEND = "matchlock"
 

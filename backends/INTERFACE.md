@@ -19,7 +19,7 @@ via dot-access: `be = matchlock.make(); be.start(opts)`.
 
 | Key                  | Type   | Required | Notes                                                                 |
 | -------------------- | ------ | -------- | --------------------------------------------------------------------- |
-| `NAME`               | string | yes      | `"matchlock"`, `"podman"`, …                                          |
+| `NAME`               | string | yes      | `"matchlock"`, `"podman"`, `"container"`, …                          |
 | `SUPPORTS_GUI`       | bool   | yes      | true when the backend wires up a display server into the guest        |
 | `SUPPORTS_AUDIO`     | bool   | yes      | true when the backend wires the host sound server into the guest      |
 | `SUPPORTS_EXPORT`    | bool   | yes      | true when `export_archive` / `import_archive` are implemented         |

@@ -205,7 +205,7 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     elsif a == "--backend" || a == "-b"
       i = i + 1
       if i >= len(args)
-        _err("--backend requires a value (matchlock or podman)")
+        _err("--backend requires a value (matchlock, podman or container)")
         os.exit(2)
       end
       backend = args[i]
@@ -285,7 +285,7 @@ def print_version(version)
 end
 
 def print_help(default_ai_agent)
-  puts "yolo — fast persistent per-directory dev environments (matchlock VMs or podman containers)."
+  puts "yolo — fast persistent per-directory dev environments (matchlock VMs, podman or Apple containers)."
   puts ""
   puts "Usage:"
   puts "  yolo                            Ensure VM, auto-provision (once), shell in."
@@ -296,8 +296,9 @@ def print_help(default_ai_agent)
   puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
   puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: #{default_ai_agent})."
   puts "                                  Known agents: copilot, opencode."
-  puts "  yolo --backend NAME [...]       Pick a backend: matchlock (microVM, default)"
-  puts "                                  or podman (container, supports GUI). The"
+  puts "  yolo --backend NAME [...]       Pick a backend: matchlock (microVM, default),"
+  puts "                                  podman (container, GUI/audio capable) or"
+  puts "                                  container (Apple `container`, macOS). The"
   puts "                                  binding is sticky: once a VM is created the"
   puts "                                  backend is recorded and re-used on attach."
   puts "  yolo --gui [...]                Bind-mount the host Wayland socket into the"
@@ -320,7 +321,7 @@ def print_help(default_ai_agent)
   puts "  yolo -h, --help                 Print this help and exit."
   puts "  yolo ls                         List tracked VMs with live status."
   puts "  yolo du                         List tracked VMs with disk usage."
-  puts "  yolo stop [-n NAME]             Stop VM (podman: preserves state)."
+  puts "  yolo stop [-n NAME]             Stop VM (podman/container: preserves state)."
   puts "  yolo rm   [-n NAME]             Stop + remove VM and binding."
   puts "  yolo logs [-n NAME]             Show VM log."
   puts "  yolo id   [-n NAME]             Print vm-id."
@@ -365,5 +366,5 @@ def print_help(default_ai_agent)
   puts "  YOLO_ALLOW=                Comma list of allow-listed hosts (enables MITM)"
   puts "  YOLO_USER=                 Run as uid:gid inside guest"
   puts "  YOLO_NAME=                 Override the auto-derived per-CWD name"
-  puts "  YOLO_BACKEND=              Default backend (matchlock or podman)"
+  puts "  YOLO_BACKEND=              Default backend (matchlock, podman or container)"
 end

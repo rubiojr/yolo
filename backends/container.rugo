@@ -1,0 +1,398 @@
+# backends/container.rugo — Apple `container` backend for yolo.
+#
+# Implements the contract documented in backends/INTERFACE.md.
+#
+# Apple's `container` (https://github.com/apple/container) runs Linux
+# containers inside lightweight, per-container virtual machines on macOS.
+# Each container has a real kernel and a persistent rootfs, so from yolo's
+# point of view it behaves like the podman backend: fast boot, in-guest
+# state preserved across `stop` (PERSISTS_ON_STOP=true), and provisioning
+# runs inside the running container.
+#
+# Differences from the podman backend:
+#   - The CLI is `container …` rather than `podman …`. The verbs line up
+#     closely (`run`/`exec`/`stop`/`start`/`rm`/`logs`/`inspect`) but
+#     `container` has no Go-template `--format` for `list`; it emits
+#     structured JSON instead, which we parse with the `json` module.
+#   - GUI/audio passthrough is not wired up. `container` is macOS-only and
+#     there is no Wayland/PipeWire socket to forward, so SUPPORTS_GUI and
+#     SUPPORTS_AUDIO are false (yolo refuses --gui/--audio earlier).
+#   - No export/import (matchlock-specific archive format), same as podman.
+#   - Per-container on-disk size is not introspectable, so disk accounting
+#     returns -1 (unknown).
+#
+# Container naming: `yolo-<binding>`. list_table() filters on this prefix so
+# we never collide with the user's other `container` work.
+#
+# Apple's `container` requires its system service to be running
+# (`container system start`); yolo.rugo does not manage that lifecycle — the
+# user is expected to have started it, exactly as they would have `podman`
+# or `matchlock` available on $PATH.
+
+use "os"
+use "str"
+use "color"
+use "fmt"
+use "filepath"
+use "conv"
+use "time"
+use "json"
+
+# Container name prefix used to distinguish yolo-managed containers from the
+# user's own. list_table() filters on this prefix.
+NAME_PREFIX = "yolo-"
+
+# ---------------- Logging ----------------
+def _log(msg)
+  prefix = color.dim("[yolo:container]")
+  puts "#{prefix} #{msg}"
+end
+def _warn(msg)
+  prefix = color.dim("[yolo:container]")
+  puts "#{prefix} #{color.yellow(msg)}"
+end
+def _err(msg)
+  prefix = color.dim("[yolo:container]")
+  puts "#{prefix} #{color.red(msg)}"
+end
+
+# POSIX shell-quote: wrap in single quotes; escape internal `'` as `'\''`.
+def _sh_squote(s)
+  return "'" + str.replace(s, "'", "'\\''") + "'"
+end
+
+# ---------------- list_table ----------------
+# Returns {name => [status, image]} for yolo-prefixed containers. Status is
+# normalized to "running" or "exited" (matching matchlock/podman vocabulary
+# so vm_status() in yolo.rugo can reason about it uniformly).
+#
+# `container ls -a --format json` emits an array of objects shaped like:
+#   { "id": "yolo-foo",
+#     "configuration": { "id": "yolo-foo",
+#                        "image": { "reference": "fedora:44", … }, … },
+#     "status": { "state": "running", … } }
+# (state is one of: running, stopped, stopping, unknown.)
+def _list_table_impl
+  out = try `bash -c "container ls -a --format json 2>/dev/null"` or ""
+  trimmed = str.trim(out)
+  rows = {}
+  if trimmed == ""
+    return rows
+  end
+  data = try json.parse(trimmed) or nil
+  if data == nil
+    return rows
+  end
+  for row in data
+    id = row["id"]
+    if id == nil
+      cfg0 = row["configuration"]
+      if cfg0 != nil
+        id = cfg0["id"]
+      end
+    end
+    if id == nil || id == ""
+      # skip malformed row
+    elsif !str.starts_with(id, NAME_PREFIX)
+      # not ours — skip
+    else
+      image = ""
+      cfg = row["configuration"]
+      if cfg != nil
+        img = cfg["image"]
+        if img != nil && img["reference"] != nil
+          image = img["reference"]
+        end
+      end
+      state = ""
+      st = row["status"]
+      if st != nil && st["state"] != nil
+        state = st["state"]
+      end
+      # Normalize to yolo's small vocabulary: only "running" reuses the
+      # container as-is; everything else (stopped, stopping, unknown) is
+      # treated as a resumable/recreatable "exited".
+      norm = "exited"
+      if state == "running"
+        norm = "running"
+      end
+      rows[id] = [norm, image]
+    end
+  end
+  return rows
+end
+
+# ---------------- start ----------------
+# Boot a fresh container. Returns the container name (also yolo's id for this
+# backend). Mirrors the podman backend's "boot and idle on `sleep infinity`"
+# model so `container exec` has a stable long-running target.
+def _start_impl(opts)
+  name  = opts["name"]
+  cname = NAME_PREFIX + name
+  img   = opts["image"]
+  ws    = opts["workspace"]
+  cwd   = opts["cwd"]
+
+  # Remove a stale container with the same name. Idempotent — swallow errors
+  # when the name doesn't exist.
+  qcname = _sh_squote(cname)
+  try `bash -c "container rm -f #{qcname} >/dev/null 2>&1"` or nil
+
+  user_arg = ""
+  uflag = opts["user"]
+  if uflag != nil && uflag != ""
+    user_arg = "--user #{uflag}"
+  end
+
+  # Resource limits. Unlike podman, Apple's `container` boots a real VM per
+  # container with a default 1 GiB RAM allocation that is too small for real
+  # provisioning (dnf, language toolchains), so we honour yolo's cpus/memory.
+  # mem_mb is MiB; `container` accepts a unit suffix (M = MiByte).
+  cpus_arg = ""
+  ncpus = opts["cpus"]
+  if ncpus != nil && ncpus != ""
+    cpus_arg = "--cpus #{ncpus}"
+  end
+  mem_arg = ""
+  nmem = opts["mem_mb"]
+  if nmem != nil && nmem != ""
+    mem_arg = "--memory #{nmem}M"
+  end
+  # disk_mb is advisory only: `container run` has no rootfs size flag (volumes
+  # are sized separately), so it is ignored here, matching podman.
+
+  # Published ports. Each spec is already validated as canonical "HOST:GUEST"
+  # (digits + single ':') upstream. We bind to 127.0.0.1 explicitly so guest
+  # ports are never exposed on 0.0.0.0 — same policy as the other backends.
+  publish_args = ""
+  pubs = opts["publish"]
+  if pubs != nil
+    for p in pubs
+      publish_args = publish_args + "-p 127.0.0.1:" + p + " "
+    end
+  end
+
+  cmd = "container run -d --name " + _sh_squote(cname) + " " +
+        "-v " + _sh_squote(cwd + ":" + ws) + " " +
+        "-w " + _sh_squote(ws) + " " +
+        user_arg + " " +
+        cpus_arg + " " +
+        mem_arg + " " +
+        publish_args +
+        _sh_squote(img) + " " +
+        "sleep infinity"
+
+  # Capture stdout+stderr regardless of exit code so we can surface
+  # `container`'s actual diagnostic when it fails (same rationale as the
+  # podman backend: rugo's bare backtick drops output on non-zero exit, and
+  # os.exec's failure message is just "exit status N").
+  out_file = "/tmp/yolo-container-out-#{os.pid()}"
+  wrap = "(" + cmd + ") > " + out_file + " 2>&1"
+  exec_rc = try os.exec("bash -c " + _sh_squote(wrap)) or "FAILED"
+  out = ""
+  if os.file_exists(out_file)
+    out = os.read_file(out_file)
+    os.remove(out_file)
+  end
+  trimmed = str.trim(out)
+  if exec_rc == "FAILED"
+    _err("container run failed:")
+    if trimmed != ""
+      puts trimmed
+    else
+      _err("(no output captured — is the container system service running? try `container system start`)")
+    end
+    os.exit(1)
+  end
+  # Verify the container actually exists now.
+  check = try `bash -c "container inspect #{qcname} >/dev/null 2>&1 && echo ok"` or ""
+  if str.trim(check) != "ok"
+    _err("container did not appear in `container inspect` after run:")
+    if trimmed != ""
+      puts trimmed
+    else
+      _err("(no output captured)")
+    end
+    os.exit(1)
+  end
+  return cname
+end
+
+# ---------------- stop / resume / remove ----------------
+# `container` preserves a stopped container's rootfs, so stop()/resume() form
+# a real suspend/restore pair (PERSISTS_ON_STOP=true), like podman.
+def _stop_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "container stop #{id} >/dev/null 2>&1"` or nil
+end
+
+def _resume_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "container start #{id} >/dev/null 2>&1"` or nil
+end
+
+def _remove_impl(id)
+  if id == "" || id == nil
+    return
+  end
+  try `bash -c "container rm -f #{id} >/dev/null 2>&1"` or nil
+end
+
+# ---------------- wait_ready ----------------
+# `container exec` is usable once the container reports running. `container
+# run -d` returns after the container is created, but the in-VM process may
+# take a moment to come up on first boot (the per-container VM has to start),
+# so we poll `container inspect` for status.state == "running".
+EXEC_READY_TIMEOUT_S = 60
+def _wait_ready_impl(id)
+  start = time.now()
+  notified = false
+  while time.now() - start < EXEC_READY_TIMEOUT_S
+    if _is_running(id)
+      return
+    end
+    if !notified && time.now() - start > 3
+      _log("waiting for container #{id} to reach 'running'…")
+      notified = true
+    end
+    sleep 0.2
+  end
+  _err("container #{id} did not reach 'running' within #{EXEC_READY_TIMEOUT_S}s")
+  os.exit(1)
+end
+
+# Returns true when `container inspect <id>` reports status.state == "running".
+# `container inspect` emits a JSON array of snapshot objects.
+def _is_running(id)
+  out = try `bash -c "container inspect #{id} 2>/dev/null"` or ""
+  trimmed = str.trim(out)
+  if trimmed == ""
+    return false
+  end
+  data = try json.parse(trimmed) or nil
+  if data == nil
+    return false
+  end
+  for row in data
+    st = row["status"]
+    if st != nil && st["state"] == "running"
+      return true
+    end
+  end
+  return false
+end
+
+# ---------------- logs ----------------
+def _logs_impl(id, extra)
+  extra_str = str.join(extra, " ")
+  bash -c "container logs #{extra_str} #{id}"
+end
+
+# ---------------- exec channels ----------------
+# Provisioning runs as root regardless of the container's default user, so we
+# explicitly --user 0. Mirrors podman's `--user 0` / matchlock's `-u root`.
+def _exec_provision_impl(id, src, workspace)
+  tmp = "/tmp/yolo-prov-#{os.pid()}.sh"
+  os.write_file(tmp, src)
+  bash -c "cat #{tmp} | container exec -i --user 0 -w #{workspace} #{id} bash"
+  os.remove(tmp)
+end
+
+def _exec_shell_impl(id, workspace, tty)
+  bash -c "container exec #{tty} -w #{workspace} #{id} bash -l"
+end
+
+def _exec_argv_impl(id, workspace, tty, argv)
+  # Same temp-script idiom as the podman/matchlock backends — see
+  # backends/matchlock.rugo for the full justification of why the whole
+  # invocation is written to a script rather than spliced inline (rugo's
+  # shell-fallback would otherwise eat the `$@`/quoting).
+  tmp_script = filepath.join(os.tmp_dir(), "yolo-exec-#{os.pid()}.sh")
+  script_body = <<~SH
+    #!/usr/bin/env bash
+    trap 'rm -f "#{tmp_script}"' EXIT
+    exec container exec #{tty} -w #{workspace} #{id} bash -lc 'exec "$@"' bash #{argv}
+  SH
+  os.write_file(tmp_script, script_body)
+  bash -c "bash #{tmp_script}"
+end
+
+# ---------------- disk accounting ----------------
+# Apple's `container` does not expose per-container on-disk size (there is no
+# size column on `container ls` and no size field on `container inspect`;
+# `container system df` only aggregates totals). Report "unknown" for both,
+# which `yolo du` renders gracefully.
+def _disk_apparent_impl(id)
+  return -1
+end
+
+def _disk_real_impl(id)
+  return -1
+end
+
+# ---------------- image registry ----------------
+def _image_remove_impl(tag)
+  if tag == "" || tag == nil
+    return
+  end
+  try `bash -c "container image rm #{tag} >/dev/null 2>&1"` or nil
+end
+
+# ---------------- Factory ----------------
+def make
+  be = {}
+  be["NAME"]             = "container"
+  be["SUPPORTS_GUI"]     = false
+  be["SUPPORTS_AUDIO"]   = false
+  be["SUPPORTS_EXPORT"]  = false
+  be["PERSISTS_ON_STOP"] = true
+  be["DEFAULT_IMAGE"]    = "registry.fedoraproject.org/fedora:44"
+
+  be["list_table"] = fn()
+    return _list_table_impl()
+  end
+  be["start"] = fn(opts)
+    return _start_impl(opts)
+  end
+  be["stop"] = fn(id)
+    _stop_impl(id)
+  end
+  be["resume"] = fn(id)
+    _resume_impl(id)
+  end
+  be["remove"] = fn(id)
+    _remove_impl(id)
+  end
+  be["wait_ready"] = fn(id)
+    _wait_ready_impl(id)
+  end
+  be["logs"] = fn(id, extra)
+    _logs_impl(id, extra)
+  end
+  be["exec_provision"] = fn(id, src, workspace)
+    _exec_provision_impl(id, src, workspace)
+  end
+  be["exec_shell"] = fn(id, workspace, tty)
+    _exec_shell_impl(id, workspace, tty)
+  end
+  be["exec_argv"] = fn(id, workspace, tty, argv)
+    _exec_argv_impl(id, workspace, tty, argv)
+  end
+  be["disk_apparent"] = fn(id)
+    return _disk_apparent_impl(id)
+  end
+  be["disk_real"] = fn(id)
+    return _disk_real_impl(id)
+  end
+  be["image_remove"] = fn(tag)
+    _image_remove_impl(tag)
+  end
+  # Export/import: SUPPORTS_EXPORT=false; yolo.rugo refuses those subcommands
+  # at the CLI layer before dispatching, so they are intentionally absent.
+
+  return be
+end

@@ -27,6 +27,7 @@ use "fmt"
 use "filepath"
 use "conv"
 use "time"
+require "version"
 
 # ---------------- Backends ----------------
 # Each backend lives at `backends/<name>.rugo` and exposes a `make()` factory
@@ -112,11 +113,6 @@ SKILLS = {
   "yolofile-author" => skill_yolofile_author,
   "yolo-developer"  => skill_yolo_developer
 }
-
-# ---------------- Config ----------------
-# Bump this on every release tag (also bumped by hand on `main` after a
-# release so `main` builds advertise a `-dev` suffix).
-VERSION = "0.7.0"
 
 def env_or(name, fallback)
   v = os.getenv(name)
@@ -1762,7 +1758,7 @@ def json_string_field(src, key)
 end
 
 # ---------------- Main ----------------
-parsed = cli.parse_args(os.args(), AI_AGENTS, DEFAULT_AI_AGENT, VERSION)
+parsed = cli.parse_args(os.args(), AI_AGENTS, DEFAULT_AI_AGENT, version.VERSION)
 sub = parsed.sub
 
 # `install-skills` is a pure local operation (writes embedded SKILL.md files

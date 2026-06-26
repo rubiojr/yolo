@@ -88,6 +88,12 @@ Notes and current limitations of the container backend:
 - `YOLO_CPUS` and `YOLO_MEM_MB` **are** honoured (the per-container VM gets
   its own CPU/RAM allocation — the default 1 GiB is too small for real
   provisioning). `YOLO_DISK_MB` is ignored.
+- **DNS is injected automatically.** Apple's `container` gives each VM a
+  per-VM resolver (the vmnet gateway) that does not resolve external names,
+  so yolo passes `--dns 1.1.1.1` on `container run` — otherwise the guest
+  has no working DNS and `dnf`/`curl`/`git` fail during provisioning.
+  Override the nameserver(s) with `YOLO_CONTAINER_DNS` (space-separated,
+  e.g. `YOLO_CONTAINER_DNS="1.1.1.1 8.8.8.8"`).
 
 
 ## GUI mode (`--gui`)

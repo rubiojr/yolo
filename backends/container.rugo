@@ -42,6 +42,14 @@ use "json"
 # user's own. list_table() filters on this prefix.
 NAME_PREFIX = "yolo-"
 
+# Default DNS nameserver(s) injected into `container run`. Apple's `container`
+# gives each VM a per-VM resolver (the vmnet gateway) that does NOT resolve
+# external names, so without an explicit --dns the guest has no working DNS at
+# all — `dnf`, `curl`, `git clone`, etc. all fail during provisioning. The
+# `oc` reference launcher hits the same wall and injects --dns for exactly this
+# reason. Space-separated; override with $YOLO_CONTAINER_DNS.
+DEFAULT_DNS = "1.1.1.1"
+
 # ---------------- Logging ----------------
 def _log(msg)
   prefix = color.dim("[yolo:container]")
@@ -59,6 +67,56 @@ end
 # POSIX shell-quote: wrap in single quotes; escape internal `'` as `'\''`.
 def _sh_squote(s)
   return "'" + str.replace(s, "'", "'\\''") + "'"
+end
+
+# Build the `--dns <ip>` flags for `container run`. Reads $YOLO_CONTAINER_DNS
+# (space-separated nameservers), falling back to DEFAULT_DNS. Each nameserver
+# is validated against a strict IP-literal charset ([0-9a-fA-F:.]) before being
+# spliced into the host-side command line — the value comes from the
+# environment, so it must never be able to inject shell metacharacters.
+def _dns_args
+  raw = os.getenv("YOLO_CONTAINER_DNS")
+  if raw == ""
+    raw = DEFAULT_DNS
+  end
+  args = ""
+  for ns in str.fields(raw)
+    if _valid_ip(ns)
+      args = args + "--dns " + ns + " "
+    else
+      _warn("ignoring invalid YOLO_CONTAINER_DNS entry '#{ns}' (not an IP literal)")
+    end
+  end
+  return args
+end
+
+# True when `s` is a plausible, shell-safe IPv4/IPv6 literal: non-empty and made
+# up only of hex digits, dots and colons. This is deliberately permissive about
+# IP *shape* but strict about the *charset* — the point is injection safety, not
+# RFC validation (container itself rejects a malformed address).
+def _valid_ip(s)
+  if s == "" || len(s) > 45
+    return false
+  end
+  i = 0
+  while i < len(s)
+    c = str.slice(s, i, i + 1)
+    ok = false
+    if c >= "0" && c <= "9"
+      ok = true
+    elsif c >= "a" && c <= "f"
+      ok = true
+    elsif c >= "A" && c <= "F"
+      ok = true
+    elsif c == "." || c == ":"
+      ok = true
+    end
+    if !ok
+      return false
+    end
+    i = i + 1
+  end
+  return true
 end
 
 # ---------------- list_table ----------------
@@ -172,12 +230,18 @@ def _start_impl(opts)
     end
   end
 
+  # Working DNS. Required: container's default per-VM resolver can't reach the
+  # internet, so without --dns the guest can't resolve any external name and
+  # provisioning (dnf/curl/git) fails. See DEFAULT_DNS / $YOLO_CONTAINER_DNS.
+  dns_args = _dns_args()
+
   cmd = "container run -d --name " + _sh_squote(cname) + " " +
         "-v " + _sh_squote(cwd + ":" + ws) + " " +
         "-w " + _sh_squote(ws) + " " +
         user_arg + " " +
         cpus_arg + " " +
         mem_arg + " " +
+        dns_args +
         publish_args +
         _sh_squote(img) + " " +
         "sleep infinity"

@@ -46,6 +46,7 @@ For per-project configuration that travels with the repo, use a
 | `YOLO_NAME`       | `cwd-<sha1>`   | Override the auto-derived name. |
 | `YOLO_USER`       | unset          | Pass `--user uid:gid` to matchlock for non-root execution. |
 | `YOLO_ALLOW`      | unset          | Enables matchlock's MITM allow-list mode — see [Networking](./06-networking.md). |
+| `YOLO_CONTAINER_DNS` | `1.1.1.1`   | Nameserver(s) for the `container` backend (space-separated). Injected as `--dns` because container's per-VM resolver can't reach external names. See [Backends](./09-backends.md). |
 | `YOLO_GO_VERSION` | _latest_       | Pin the Go version in `fedora-go`. Default resolves `https://go.dev/VERSION?m=text`. |
 | `XDG_RUNTIME_DIR` | `/tmp`         | Where `yolo` keeps its name → vm-id state files. |
 

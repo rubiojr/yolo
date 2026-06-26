@@ -367,4 +367,5 @@ def print_help(default_ai_agent)
   puts "  YOLO_USER=                 Run as uid:gid inside guest"
   puts "  YOLO_NAME=                 Override the auto-derived per-CWD name"
   puts "  YOLO_BACKEND=              Default backend (matchlock, podman or container)"
+  puts "  YOLO_CONTAINER_DNS=1.1.1.1  Nameserver(s) for the container backend (space-sep)"
 end

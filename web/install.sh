@@ -150,10 +150,12 @@ case "$(uname -m)" in
 esac
 
 # ---------------- Pre-flight: required commands ----------------
+# NB: curl is NOT required here — Fedora/Ubuntu cloud images don't ship it,
+# and the Linux branch installs it as a host dependency. We require curl
+# *after* that install (Linux) / in the macOS branch, before it's used.
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 need_cmd uname
 need_cmd bash
-need_cmd curl
 
 if [ "$OS_KIND" = "linux" ]; then
   # ============================================================
@@ -229,6 +231,10 @@ if [ "$OS_KIND" = "linux" ]; then
   else
     warn "Skipping host dependency install (--skip-deps)"
   fi
+
+  # curl is needed from here on (matchlock asset query, yolo download). It was
+  # just installed above unless --skip-deps was passed; require it now.
+  need_cmd curl
 
   # ---------------- Install matchlock ----------------
   # We deliberately don't use matchlock's upstream curl|bash installer here:
@@ -409,6 +415,9 @@ else
   # install it here, we just flag whether it's present.
   # ============================================================
   log "Pre-flight: macOS host (darwin/${ARCH})"
+
+  # macOS ships curl in the base system; it's needed for the yolo download.
+  need_cmd curl
 
   if [ "$SKIP_MATCHLOCK" -eq 1 ] || [ "$SKIP_PODMAN" -eq 1 ] || \
      [ "$SKIP_SETUP" -eq 1 ] || [ "$SKIP_DEPS" -eq 1 ]; then

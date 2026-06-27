@@ -93,6 +93,20 @@ if ! command -v container >/dev/null 2>&1; then
     log "verified: install.sh flags missing Apple 'container' CLI with install link"
 fi
 
+# matchlock is a supported opt-in macOS backend — install.sh must flag it
+# (present: show version + how to select it; absent: the Homebrew install hint),
+# never install it.
+if command -v matchlock >/dev/null 2>&1; then
+    grep -qi "matchlock found" "$OUT" \
+        || die "expected install.sh to report the present matchlock backend"
+else
+    grep -qi "matchlock .*was not found" "$OUT" \
+        || die "expected install.sh to flag the missing matchlock backend"
+    grep -q "brew install matchlock" "$OUT" \
+        || die "expected install.sh to print the matchlock Homebrew install hint"
+fi
+log "verified: install.sh flags the matchlock macOS backend (no install)"
+
 # ---------------- Assertion: container-backend preflight ----------------
 # container is the default backend on macOS; with no `container` CLI present the
 # backend must fail fast with the install link (exit 127), not a cryptic error.

@@ -11,10 +11,11 @@
 # Supported hosts:
 #   - Linux: Fedora (Workstation/Server/Cloud; not Atomic/rpm-ostree variants)
 #            and Ubuntu 26.04 LTS (Resolute Raccoon).
-#   - macOS: Apple silicon / Intel. Installs only the yolo binary; the default
-#            backend there is Apple's `container`, which this script does NOT
-#            install — it just flags it if it's missing (see
-#            https://github.com/apple/container/releases).
+#   - macOS: Apple silicon / Intel. Installs only the yolo binary. The default
+#            backend there is Apple's `container`; matchlock is a supported
+#            opt-in backend on Apple Silicon. This script installs neither
+#            runtime — it just flags whether each is present (Apple `container`
+#            ships as a signed pkg; matchlock installs via Homebrew).
 #
 # What it does:
 #   Linux:
@@ -417,8 +418,9 @@ KERNEL=="tun", MODE="0666"
 else
   # ============================================================
   # macOS host: only the yolo binary is installed. The default backend is
-  # Apple's `container`, which ships as a signed Apple package — we do NOT
-  # install it here, we just flag whether it's present.
+  # Apple's `container` (a signed Apple package); matchlock is a supported
+  # opt-in backend on Apple Silicon (installs via Homebrew). We install
+  # neither runtime here — we just flag whether each is present.
   # ============================================================
   log "Pre-flight: macOS host (darwin/${ARCH})"
 
@@ -439,6 +441,21 @@ else
     warn "Install the latest release from:"
     warn "    ${CONTAINER_INSTALL_URL}"
     warn "Then start the service with:  container system start"
+  fi
+
+  # matchlock is a supported (opt-in) macOS backend on Apple Silicon — it runs
+  # the same micro-VM model on Virtualization.framework and is the only way to
+  # get yolo export/import + egress allow-listing on a Mac. We only *flag* it
+  # here (Homebrew install is the user's choice), mirroring how we treat the
+  # Apple `container` CLI above.
+  if command -v matchlock >/dev/null 2>&1; then
+    MLVER="$(matchlock --version 2>/dev/null | head -n1 || true)"
+    log "  matchlock found${MLVER:+: $MLVER}  (use it with: yolo --backend matchlock)"
+  else
+    warn "matchlock (optional macOS backend) was not found on PATH."
+    warn "Install it with Homebrew if you want export/import + egress allow-listing:"
+    warn "    brew tap jingkaihe/essentials && brew install matchlock"
+    warn "Then select it per-run with:  yolo --backend matchlock"
   fi
 fi
 
@@ -554,17 +571,27 @@ else
     then start it with:  container system start"
   fi
 
+  if command -v matchlock >/dev/null 2>&1; then
+    MATCHLOCK_VER="$(matchlock --version 2>/dev/null | head -n1 || true)"
+  else
+    MATCHLOCK_VER="(not installed — optional; brew install matchlock)"
+  fi
+
   cat <<EOF
 
 ${C_BLUE}==>${C_RESET} All done.
 
 Next steps:
 ${CONTAINER_STEP}
+  - Optional matchlock backend (export/import + egress allow-listing):
+      brew tap jingkaihe/essentials && brew install matchlock
+      yolo --backend matchlock        # or: export YOLO_BACKEND=matchlock
   - cd into a project and run:  yolo
 
 Versions:
   yolo:      ${YOLO_LABEL}  (${YOLO_PREFIX}/yolo)
   container: ${CONTAINER_VER:-(not installed)}
+  matchlock: ${MATCHLOCK_VER}
 
 EOF
 fi

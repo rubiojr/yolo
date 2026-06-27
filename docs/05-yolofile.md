@@ -129,6 +129,7 @@ a single `key: value` pair.
 | `gui`                                    | bool    | `false`      | `true`, `false`                         |
 | `audio`                                  | bool    | `false`      | `true`, `false`                         |
 | `publish`                                | ports   | *(none)*     | `8080`, `8080:80`, `8080:80, 5432:5432` |
+| `mount`                                  | mounts  | *(none)*     | `./data:data`, `./conf:etc/app:ro`      |
 | `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
 | `description`                            | string  | *(unset)*    | `Dev VM for the billing API`            |
 
@@ -208,6 +209,54 @@ Rules and behaviour:
 
 See [Networking § Publishing guest ports](./06-networking.md#67-publishing-guest-ports-to-the-host)
 for a full walkthrough.
+
+#### `mount`
+
+Bind-mount one or more **extra** host directories into the guest, in
+addition to your `$PWD` (which is always mounted at `/work`). Equivalent
+to passing `--mount` on the command line.
+
+Front matter can't express lists, so `mount` takes a **comma-separated**
+value. Each entry is `HOST:GUEST[:MODE]`:
+
+```bash
+---
+# mount ./data read-write at /work/data, and ./conf read-only at /work/etc/app
+mount: ./data:data, ./conf:etc/app:ro
+---
+```
+
+- **`HOST`** — the host directory to share. In front matter it **must
+  resolve to a path inside the project directory** (the directory the
+  Yolofile lives in). Absolute paths and `..` escapes that climb above
+  the project are **rejected** unless `yolo` is run with
+  `--allow-absolute-mounts`. This keeps a committed (or `--yolofile URL`)
+  Yolofile from quietly mounting `~/.ssh`, `/`, or other host paths it
+  has no business touching — a Yolofile already has root inside the guest
+  and full read-write access to `$PWD`, and this preserves exactly that
+  blast radius. A relative `HOST` is resolved against the project
+  directory.
+- **`GUEST`** — where it appears in the guest. A **relative** path is
+  placed under the workspace (`data` → `/work/data`); an **absolute**
+  path (`/data`) is honoured on the `podman` and `container` backends but
+  **rejected on `matchlock`** unless it is itself under `/work` (matchlock
+  can only mount under the workspace). `GUEST` is required and may not be
+  the workspace root itself.
+- **`MODE`** — `ro` or `rw`. Defaults to `rw`.
+
+Rules and behaviour:
+
+- `:` is the field separator; host or guest paths that themselves contain
+  `:` are not supported in this short form (the same limitation `docker
+  -v` has). Likewise, because the list is comma-separated, paths
+  containing `,` cannot be expressed here.
+- Mounting happens at **VM creation** only (like `cpus` / `publish`).
+  Editing `mount:` does **not** remount on an existing VM — `yolo rm`
+  then `yolo` to apply the change.
+- A CLI `--mount` flag (any number of them) **replaces** the front-matter
+  list for that run, consistent with `--publish`.
+- Backend support and the matchlock workspace restriction are covered in
+  [Backends § Mounting host directories](./09-backends.md#mounting-host-directories---mount).
 
 #### `image`
 

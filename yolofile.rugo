@@ -128,6 +128,53 @@ def _normalize_publish(s)
   return host + ":" + guest
 end
 
+# ---------------- Mount specs ----------------
+# Parse a single bind-mount spec `HOST:GUEST[:MODE]` into {host, guest, mode,
+# err}. Mirrors cli.parse_mount (duplicated, small/pure/stable, to keep modules
+# standalone). Only validates *syntax*: path resolution, the matchlock
+# under-/work constraint, and the front-matter host-containment gate all live
+# in yolo.rugo, which knows $PWD / the workspace / the --allow-absolute-mounts
+# flag. MODE is restricted to a fixed ro/rw allowlist so it can never reach the
+# host shell as free text.
+def _parse_mount(s)
+  bad = {host: "", guest: "", mode: "", err: ""}
+  t = str.trim(s)
+  if t == ""
+    bad.err = "empty mount spec"
+    return bad
+  end
+  parts = str.split(t, ":")
+  n = len(parts)
+  if n < 2 || n > 3
+    bad.err = "expected HOST:GUEST[:MODE]"
+    return bad
+  end
+  host = str.trim(parts[0])
+  guest = str.trim(parts[1])
+  mode = "rw"
+  if n == 3
+    mode = str.lower(str.trim(parts[2]))
+  end
+  if host == "" || guest == ""
+    bad.err = "HOST and GUEST must both be non-empty"
+    return bad
+  end
+  # Reject commas in paths: the container backend renders mounts as
+  # `--mount type=bind,source=HOST,target=GUEST`, where comma separates
+  # options — a path containing ',' could otherwise smuggle in extra mount
+  # options. (Front-matter `mount:` is also comma-separated, so a ',' here is
+  # ambiguous regardless.)
+  if str.index(host, ",") >= 0 || str.index(guest, ",") >= 0
+    bad.err = "',' is not allowed in a mount path"
+    return bad
+  end
+  if mode != "ro" && mode != "rw"
+    bad.err = "MODE must be 'ro' or 'rw'"
+    return bad
+  end
+  return {host: host, guest: guest, mode: mode, err: ""}
+end
+
 # ---------------- File location ----------------
 def path
   return filepath.join(os.cwd(), FILENAME)
@@ -266,13 +313,13 @@ end
 # Returns a hash of resolved overrides; on validation failure, prints a
 # message and exits the process (same hard-fail semantics as the original).
 def validate(fm, backends, ai_agents, default_ai_agent)
-  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false, audio: false, audio_set: false, publish: []}
+  out = {image: "", cpus: "", mem_mb: "", disk_mb: "", agent: "", agent_set: false, backend: "", gui: false, gui_set: false, audio: false, audio_set: false, publish: [], mounts: []}
   # `description` is accepted as free-form, self-documenting metadata. yolo
   # never reads, validates, or displays it — it exists so authors can annotate
   # a Yolofile without tripping the unknown-key warning below. It lives in
   # `known` only (intentionally absent from `out`): there is no behaviour
   # attached to it.
-  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "audio" => true, "publish" => true, "description" => true}
+  known = {"image" => true, "cpus" => true, "memory" => true, "disk_size" => true, "disk" => true, "disk_mb" => true, "ai_agent" => true, "backend" => true, "gui" => true, "audio" => true, "publish" => true, "mount" => true, "description" => true}
   for k in fm
     if known[k] != true
       _warn("Yolofile: ignoring unknown front matter key '#{k}'")
@@ -376,6 +423,25 @@ def validate(fm, backends, ai_agents, default_ai_agent)
           os.exit(2)
         end
         out.publish = append(out.publish, spec)
+      end
+    end
+  end
+  # Front matter can't express lists, so accept a comma-separated value:
+  #   mount: ./data:data, ./conf:etc/app:ro
+  # Only the syntax is validated here. yolo.rugo resolves each host/guest to an
+  # absolute path, enforces the matchlock-under-/work rule, and applies the
+  # host-containment gate (Yolofile mounts must stay inside $PWD unless
+  # --allow-absolute-mounts) — none of which this pure module can see.
+  v_mount = fm["mount"]
+  if v_mount != nil && v_mount != ""
+    for part in str.split(v_mount, ",")
+      if str.trim(part) != ""
+        m = _parse_mount(part)
+        if m.err != ""
+          _err("Yolofile: invalid 'mount' value: '#{str.trim(part)}' (#{m.err})")
+          os.exit(2)
+        end
+        out.mounts = append(out.mounts, {host: m.host, guest: m.guest, mode: m.mode})
       end
     end
   end

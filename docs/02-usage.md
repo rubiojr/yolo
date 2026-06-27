@@ -104,7 +104,25 @@ yolo logs                         # the VM's serial console log
 
 All three accept `-n NAME` to target a non-default VM.
 
-## 2.7 CLI reference
+## 2.7 Mounting extra host directories
+
+Your `$PWD` is always mounted at `/work`. To share **additional** host
+directories with the guest, use the repeatable `--mount` flag with a
+`HOST:GUEST[:MODE]` spec (`MODE` is `ro` or `rw`, default `rw`):
+
+```bash
+yolo --mount ~/.cache/shared:cache          # rw at /work/cache
+yolo --mount ./fixtures:data:ro             # read-only at /work/data
+yolo --mount ~/models:/models               # absolute guest path (podman/container)
+```
+
+A relative `GUEST` lands under `/work`; an absolute `GUEST` works on the
+`podman` and `container` backends but not `matchlock` (which confines
+mounts to `/work`). The same thing is expressible per-project via the
+Yolofile `mount:` front-matter key. See
+[Backends § Mounting host directories](./09-backends.md#mounting-host-directories---mount).
+
+## 2.8 CLI reference
 
 ```
 yolo                            Ensure VM, auto-provision (once), shell in.
@@ -123,6 +141,16 @@ yolo --publish [HOST:]GUEST [...]
                                 Repeatable; also -p. A bare PORT means PORT:PORT.
                                 Applied at VM creation; the guest service must
                                 listen on 0.0.0.0. See docs/06-networking.md.
+yolo --mount HOST:GUEST[:MODE] [...]
+                                Bind-mount an extra host dir into the guest.
+                                Repeatable. MODE is ro|rw (default rw). A
+                                relative GUEST lands under /work; absolute
+                                guest paths need podman/container. Applied at
+                                VM creation. See docs/09-backends.md.
+yolo --allow-absolute-mounts [...]
+                                Permit a Yolofile 'mount:' whose host path
+                                resolves outside the project dir. CLI --mount
+                                paths are always allowed.
 yolo -n NAME [...]              Use a named VM instead of the per-CWD one.
 yolo --backend NAME [...]       Pick a backend (matchlock|podman) for a new VM.
                                 Sticky once the VM exists; rm it to switch.

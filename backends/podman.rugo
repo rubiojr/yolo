@@ -128,15 +128,41 @@ def _start_impl(opts)
     end
   end
 
+  # Extra host bind-mounts. yolo resolves each {host, guest, mode} to absolute
+  # paths upstream; podman takes the guest path verbatim and maps the mode token
+  # directly (`rw`/`ro`). host/guest are single-quoted to survive spaces; they
+  # never contain ':' (the upstream parser would have rejected such a spec).
+  # The `,z` opt relabels the mount for SELinux (shared `container_file_t`) so
+  # the container can actually read/write it on enforcing hosts (Fedora/RHEL);
+  # it is a harmless no-op where SELinux is disabled. See the `:z` note on the
+  # workspace mount below.
+  mount_args = ""
+  ms = opts["mounts"]
+  if ms != nil
+    for m in ms
+      mount_args = mount_args + "-v " + _sh_squote(m["host"] + ":" + m["guest"] + ":" + m["mode"] + ",z") + " "
+    end
+  end
+
   # Hostname inside the container. Podman defaults to the container id;
   # set it to the binding name for prettier prompts (mirrors matchlock).
+  #
+  # The workspace bind mount carries the `:z` SELinux option. On enforcing
+  # hosts (Fedora/RHEL — yolo's primary target) an unlabelled bind mount is
+  # inaccessible to the containerized process ("Permission denied" reading
+  # /work), because the host files keep their original SELinux type. `:z`
+  # relabels the mounted tree to the shared `container_file_t` so the guest can
+  # use it; it is a no-op where SELinux is disabled (other distros, macOS). We
+  # use shared `:z` rather than private `:Z` so the host and other tools keep
+  # access to the project directory.
   cmd = "podman run -d --name " + _sh_squote(cname) + " " +
         "--hostname " + _sh_squote(name) + " " +
-        "-v " + _sh_squote(cwd + ":" + ws) + " " +
+        "-v " + _sh_squote(cwd + ":" + ws + ":z") + " " +
         "-w " + _sh_squote(ws) + " " +
         user_arg + " " +
         gui_args + " " +
         audio_args + " " +
+        mount_args +
         publish_args +
         _sh_squote(img) + " " +
         "sleep infinity"

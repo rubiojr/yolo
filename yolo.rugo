@@ -52,9 +52,12 @@ BACKENDS = {
   "container" => container.make()
 }
 
-# Default backend, chosen by host OS: matchlock (Firecracker microVMs) needs
-# KVM and only exists on Linux, so it can't be the default on macOS. There,
-# Apple's `container` is the sensible out-of-the-box backend. Any explicit
+# Default backend, chosen by host OS. matchlock now runs on both Linux (via
+# KVM/Firecracker) and macOS on Apple Silicon (via Virtualization.framework),
+# so it is a supported backend everywhere. On macOS we still default to Apple's
+# `container` because it ships as a signed Apple package with zero extra host
+# setup, whereas matchlock is a Homebrew opt-in there — pick it explicitly with
+# `--backend matchlock` / `YOLO_BACKEND` / a Yolofile `backend:`. Any explicit
 # selection (sticky <name>.backend, --backend, YOLO_BACKEND, Yolofile
 # `backend:`) still wins over this — see resolve_backend_name().
 def detect_default_backend
@@ -129,7 +132,10 @@ IMAGE     = env_or("YOLO_IMAGE",     "")
 # set this you'll also need to trust matchlock's per-VM CA in the guest (or
 # use --no-check-cert flags), since MITM rewrites every TLS cert chain.
 ALLOW     = env_or("YOLO_ALLOW",     "")
-WORKSPACE = env_or("YOLO_WORKSPACE", "/work")
+# Cleaned so a trailing slash (YOLO_WORKSPACE=/work/) can't break the
+# mount-path comparisons in resolve_mounts() and the matchlock guest-under-
+# workspace check (which compare against `WORKSPACE` and `WORKSPACE + "/"`).
+WORKSPACE = filepath.clean(env_or("YOLO_WORKSPACE", "/work"))
 # Resource defaults — bigger than matchlock's stock 1 CPU / 512 MB / 5 GB,
 # because building Go dev tools (or anything similar) on the stock allocation
 # runs out of disk and is painfully slow. Override per env var if needed.
@@ -169,6 +175,13 @@ audio_enabled = false
 # Yolofile `publish:` front matter before the first backend start(). Bound to
 # 127.0.0.1 by the backends. Applied at VM creation only (like cpus/memory).
 publish_ports = []
+
+# Extra host bind-mounts for this invocation, as resolved {host, guest, mode}
+# hashes where `host` and `guest` are absolute paths and `mode` is "ro"/"rw".
+# Populated in main from --mount flags and/or Yolofile `mount:` front matter,
+# after path resolution and the host-containment gate. Threaded into the
+# backend start() opts; applied at VM creation only (like publish_ports).
+mounts = []
 
 # Host directory mounted at WORKSPACE. Normal runs mount the invoking cwd;
 # --ephemeral replaces this with a fresh temporary directory.
@@ -348,6 +361,74 @@ def read_yolofile_source(src)
   return {display: p, content: os.read_file(p), err: ""}
 end
 
+# ---------------- Mounts ----------------
+# True when absolute path `p` is `base` itself or lives underneath it. Used by
+# the front-matter host-containment gate. Both arguments must already be
+# cleaned/absolute. Special-cases base == "/" (where `base + "/"` would be
+# "//").
+def path_within(p, base)
+  if p == base
+    return true
+  end
+  if base == "/"
+    return str.starts_with(p, "/")
+  end
+  return str.starts_with(p, base + "/")
+end
+
+# Resolve a list of raw {host, guest, mode} mount specs (host/guest as written
+# by the user) into {host, guest, mode} with absolute host + guest paths, ready
+# to hand to a backend.
+#
+#   - host: relative paths resolve against $PWD; both relative and absolute are
+#     cleaned (filepath.join/clean call filepath.Clean), so a ".." escape can't
+#     slip past the containment gate below.
+#   - guest: relative paths resolve under the workspace (/work) so the common
+#     case is portable across every backend; absolute guest paths are kept as-is
+#     (honoured by podman/container; matchlock rejects out-of-/work guests).
+#   - Security gate: when the specs did NOT come from the trusted CLI (i.e. they
+#     came from a Yolofile, which may be a committed file or a `--yolofile URL`),
+#     the resolved host path must stay inside $PWD unless `allow_abs` is set
+#     (--allow-absolute-mounts). This preserves the existing blast radius — a
+#     Yolofile already has root in the guest and rw access to $PWD, but nothing
+#     outside it.
+def resolve_mounts(raw, from_cli, allow_abs)
+  out = []
+  cwd = os.cwd()
+  for m in raw
+    host = m.host
+    guest = m.guest
+    mode = m.mode
+    abs_host = ""
+    if filepath.is_abs(host)
+      abs_host = filepath.clean(host)
+    else
+      abs_host = filepath.join(cwd, host)
+    end
+    if !from_cli && !allow_abs
+      if !path_within(abs_host, cwd)
+        err_("Yolofile mount: host path '#{host}' resolves outside the project directory")
+        err_("  resolved: #{abs_host}")
+        err_("  project:  #{cwd}")
+        err_("Use a path inside the project, or pass --allow-absolute-mounts to permit it.")
+        os.exit(2)
+      end
+    end
+    abs_guest = ""
+    if filepath.is_abs(guest)
+      abs_guest = filepath.clean(guest)
+    else
+      abs_guest = filepath.join(WORKSPACE, guest)
+    end
+    if abs_guest == WORKSPACE
+      err_("mount: guest path may not be the workspace root (#{WORKSPACE}); it is reserved for $PWD")
+      os.exit(2)
+    end
+    out = append(out, {"host" => abs_host, "guest" => abs_guest, "mode" => mode})
+  end
+  return out
+end
+
 def active_yolofile_exists
   if yolofile_override != ""
     return true
@@ -412,7 +493,8 @@ def start_vm(name)
     "allow"     => ALLOW,
     "gui"       => gui_enabled,
     "audio"     => audio_enabled,
-    "publish"   => publish_ports
+    "publish"   => publish_ports,
+    "mounts"    => mounts
   }
   id = be.start(opts)
   os.write_file(state_file(name), id)
@@ -1792,6 +1874,12 @@ end
 # `yolo rm`, `yolo stop`, `yolo logs`, etc., which need to operate on
 # already-existing VM state regardless of the (possibly broken) file.
 applies_resources = (sub == "" || sub == "provision" || sub == "export")
+# Raw (unresolved) extra mounts and whether they came from the trusted CLI.
+# Front matter fills these inside the block below; a CLI --mount replaces them
+# afterwards. resolve_mounts() turns them into the absolute-path `mounts`
+# global once both sources have been considered.
+raw_mounts = []
+mounts_from_cli = false
 if applies_resources && active_yolofile_exists()
   yf_parsed = parse_active_yolofile()
   if yf_parsed.err != ""
@@ -1823,6 +1911,10 @@ if applies_resources && active_yolofile_exists()
   if len(fm_resolved.publish) > 0
     publish_ports = fm_resolved.publish
   end
+  if len(fm_resolved.mounts) > 0
+    raw_mounts = fm_resolved.mounts
+    mounts_from_cli = false
+  end
   # CLI --ai-agent / --no-ai-agent wins; otherwise honour Yolofile front matter.
   if !parsed.agent_set && fm_resolved.agent_set
     parsed.agent = fm_resolved.agent
@@ -1846,6 +1938,17 @@ end
 # replace-not-merge precedence used for the other resource settings).
 if len(parsed.publish) > 0
   publish_ports = parsed.publish
+end
+# CLI --mount replaces any Yolofile `mount:` set (same replace precedence as
+# --publish). CLI mounts are trusted (you typed them), so the host-containment
+# gate is skipped for them. resolve_mounts() turns the raw specs into absolute
+# host+guest paths and enforces the gate for Yolofile-sourced mounts.
+if len(parsed.mounts) > 0
+  raw_mounts = parsed.mounts
+  mounts_from_cli = true
+end
+if len(raw_mounts) > 0
+  mounts = resolve_mounts(raw_mounts, mounts_from_cli, parsed.allow_absolute_mounts)
 end
 
 # Validate backend_sel early (only for vm-creating subcommands) so an unknown

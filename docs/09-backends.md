@@ -13,13 +13,14 @@ For the internal contract that every backend must implement, see
 
 | Capability                          | matchlock        | podman                        | container (Apple)             |
 | ----------------------------------- | ---------------- | ----------------------------- | ----------------------------- |
-| Host platform                       | Linux (KVM)      | Linux                         | macOS (Apple silicon)         |
-| Isolation                           | KVM microVM      | Container (host kernel)       | Per-container Linux VM        |
+| Host platform                       | Linux (KVM) **and** macOS (Apple Silicon) | Linux | macOS (Apple silicon)         |
+| Isolation                           | microVM (KVM on Linux, Virtualization.framework on macOS) | Container (host kernel) | Per-container Linux VM        |
 | Boot time (post first pull)         | ~1–2 s           | <1 s                          | ~1–2 s                        |
 | In-guest state across `yolo stop`   | **Not preserved** (recreate on next attach) | **Preserved** (resume on next attach) | **Preserved** (resume on next attach) |
 | GUI apps (Wayland)                  | No               | Yes (`--gui`)                 | No                            |
 | Audio (PipeWire/PulseAudio)         | No               | Yes (`--audio`)               | No                            |
 | Publish guest ports (`--publish`)   | Yes              | Yes                           | Yes                           |
+| Mount extra host dirs (`--mount`)   | Yes (guest must be under `/work`) | Yes (any guest path) | Yes (any guest path)          |
 | `yolo export` / `yolo import`       | Yes              | No                            | No                            |
 | Egress allow-list (`YOLO_ALLOW`)    | Yes (MITM proxy) | Ignored                       | Ignored                       |
 | Honours `YOLO_CPUS` / `YOLO_MEM_MB` | Yes              | Ignored (uses host)           | Yes (per-VM allocation)       |
@@ -43,9 +44,13 @@ first match wins:
 3. **`YOLO_BACKEND=NAME` env var.** Useful as a per-shell default.
 4. **`backend: NAME` in Yolofile front matter.** Project-local default.
 5. **Built-in default, by host OS:** `matchlock` on Linux, `container` on
-   macOS. (matchlock needs KVM and doesn't exist on macOS, so yolo picks
-   Apple's `container` there automatically. Any of the explicit selections
-   above still override this.)
+   macOS. matchlock also runs on macOS (Apple Silicon, via
+   Virtualization.framework), but yolo still defaults to Apple's `container`
+   there because it ships as a signed Apple package with no extra host setup,
+   whereas matchlock is a Homebrew opt-in. To use matchlock on macOS, select
+   it explicitly (`--backend matchlock`, `YOLO_BACKEND=matchlock`, or a
+   Yolofile `backend:`). Any of the explicit selections above override the
+   default.
 
 To migrate an existing binding to a different backend, you must
 `yolo rm -n NAME` first.
@@ -65,6 +70,27 @@ To migrate an existing binding to a different backend, you must
 - You need `yolo export` / `yolo import` to move a fully provisioned
   environment between hosts.
 - You want **egress allow-listing** via `YOLO_ALLOW`.
+
+### matchlock on macOS (Apple Silicon)
+
+matchlock is not Linux-only: on Apple Silicon it runs the same micro-VM
+model on **Virtualization.framework** instead of Firecracker, with the same
+CLI and yolo backend. It is the way to get `export`/`import` and egress
+allow-listing on a Mac (Apple's `container` backend has neither).
+
+- Install it with Homebrew: `brew tap jingkaihe/essentials && brew install
+  matchlock`. yolo's `install.sh` flags whether it is present but does not
+  install it for you on macOS.
+- Select it explicitly — `container` is still the macOS default:
+  `yolo --backend matchlock`, `export YOLO_BACKEND=matchlock`, or a Yolofile
+  `backend: matchlock`.
+- It needs a host with **Virtualization.framework hypervisor support**
+  (`matchlock diagnose` checks this). It will not boot inside a nested VM
+  that lacks nested virtualization — `matchlock diagnose` reports
+  "Hypervisor support is disabled" and yolo fails fast on attach.
+- Like on Linux, `yolo stop` does **not** preserve state (matchlock has no
+  checkpoint/restore), so a stopped VM is rebuilt + re-provisioned on the
+  next attach.
 
 ## When to use container (Apple)
 
@@ -188,6 +214,79 @@ printf 'pcm.!default pulse\nctl.!default pulse\n' > /etc/asound.conf
 YML
 yolo -- mpg123 some-file.mp3
 ```
+
+## Mounting host directories (`--mount`)
+
+In addition to your `$PWD` (always mounted at `/work`), you can bind-mount
+extra host directories into the guest with the repeatable `--mount` flag or
+the Yolofile `mount:` front-matter key. The spec is `HOST:GUEST[:MODE]`,
+where `MODE` is `ro` or `rw` (default `rw`):
+
+```bash
+# a read-write shared cache and a read-only config dir
+yolo --mount ~/.cache/shared:cache --mount ./conf:etc/app:ro
+```
+
+```bash
+---
+# the same, from a Yolofile (comma-separated, paths inside the project only)
+mount: ./cache:cache, ./conf:etc/app:ro
+---
+```
+
+### Guest path resolution
+
+The `GUEST` side is interpreted **relative to the workspace** when it is a
+relative path: `cache` becomes `/work/cache` on every backend. An
+**absolute** `GUEST` (e.g. `/data`) is honoured on `podman` and
+`container`, which can bind-mount at any path.
+
+**matchlock can only mount under the workspace.** Its volume mechanism
+places every mount under `--workspace` (`/work`), so an absolute `GUEST`
+that is not itself under `/work` is rejected with a clear error. Use a
+relative guest path (which lands under `/work`) for portable Yolofiles.
+
+### Read-only vs read-write
+
+`MODE` defaults to `rw`. `ro` makes the mount read-only:
+
+| Backend   | How `ro` is enforced                                              |
+| --------- | ---------------------------------------------------------------- |
+| matchlock | `-v HOST:guest:ro` (vs `:host_fs` for read-write)                |
+| podman    | `-v HOST:GUEST:ro`                                               |
+| container | `--mount type=bind,source=HOST,target=GUEST,readonly`           |
+
+### Host-path safety
+
+`--mount` paths you type on the command line are trusted: any absolute
+host path is allowed. A Yolofile `mount:` host path, however, **must
+resolve inside the project directory** — a Yolofile can be committed to a
+repo or fetched from an `https://` URL, and silently mounting `~/.ssh` or
+`/` read-write would widen its blast radius well beyond the `$PWD`-and-root
+access it already has. To deliberately allow a Yolofile to mount host
+paths outside the project, pass `--allow-absolute-mounts`.
+
+Like `--publish`, mounts are applied **at VM creation only**. Editing
+`mount:` (or passing a different `--mount`) does not remount an existing
+VM — `yolo rm` and re-attach to apply the change.
+
+### SELinux relabeling (podman)
+
+On SELinux-enforcing hosts (Fedora, RHEL, …) an unlabeled bind mount is
+**inaccessible** to the containerized process — you would see
+`Permission denied` (or `crun: getcwd: Operation not permitted`) the moment
+anything touches `/work`. To prevent that, the **podman** backend mounts
+`/work` and every `--mount` with the shared SELinux option (`:z`), which
+relabels the mounted tree to `container_file_t`. Notes:
+
+- This **changes the SELinux labels** of the files under your project
+  directory (and any `--mount` source). The shared `:z` variant keeps the
+  host and other tools working; yolo deliberately avoids the exclusive `:Z`.
+- It is a **no-op** where SELinux is not enforcing (other distros, the
+  matchlock and container backends), so it is always applied and never
+  needs configuration.
+- The relabel is recursive, so the first boot over a very large project
+  directory can take a moment.
 
 ## Stop/start semantics
 

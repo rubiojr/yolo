@@ -125,6 +125,58 @@ def normalize_publish(s)
   return host + ":" + guest
 end
 
+# ---------------- Mount specs ----------------
+# Parse a single bind-mount spec `HOST:GUEST[:MODE]` into its parts. Returns a
+# hash {host, guest, mode, err}; `err` is non-empty (and the other fields "")
+# on a malformed spec. Only the *syntax* is checked here — path resolution to
+# absolute form, the matchlock-under-/work constraint, and the front-matter
+# host-containment gate all live in yolo.rugo (which knows $PWD, the workspace,
+# and whether the spec came from the trusted CLI or a Yolofile).
+#
+# `:` is the field separator, so host/guest paths containing `:` are
+# unsupported (same limitation `docker -v` has). MODE is restricted to a fixed
+# `ro`/`rw` allowlist so a value can never reach the host shell as free text.
+# Duplicated in yolofile.rugo (small, pure, stable) to keep modules standalone,
+# matching the normalize_publish / parse_disk_size convention.
+def parse_mount(s)
+  bad = {host: "", guest: "", mode: "", err: ""}
+  t = str.trim(s)
+  if t == ""
+    bad.err = "empty mount spec"
+    return bad
+  end
+  parts = str.split(t, ":")
+  n = len(parts)
+  if n < 2 || n > 3
+    bad.err = "expected HOST:GUEST[:MODE]"
+    return bad
+  end
+  host = str.trim(parts[0])
+  guest = str.trim(parts[1])
+  mode = "rw"
+  if n == 3
+    mode = str.lower(str.trim(parts[2]))
+  end
+  if host == "" || guest == ""
+    bad.err = "HOST and GUEST must both be non-empty"
+    return bad
+  end
+  # Reject commas in paths: the container backend renders mounts as
+  # `--mount type=bind,source=HOST,target=GUEST`, where comma separates
+  # options — a path containing ',' could otherwise smuggle in extra mount
+  # options (and front-matter `mount:` is comma-separated besides). ':' can't
+  # occur here (it's the field separator, already consumed by the split above).
+  if str.index(host, ",") >= 0 || str.index(guest, ",") >= 0
+    bad.err = "',' is not allowed in a mount path"
+    return bad
+  end
+  if mode != "ro" && mode != "rw"
+    bad.err = "MODE must be 'ro' or 'rw'"
+    return bad
+  end
+  return {host: host, guest: guest, mode: mode, err: ""}
+end
+
 # ---------------- Arg parsing ----------------
 # Parse a flat argv into: subcommand, -n name, --provisioner, --yolofile,
 # --ephemeral, --ai-agent, --backend, --gui / --no-gui, rest, -- passthrough.
@@ -161,6 +213,8 @@ def parse_args(args, ai_agents, default_ai_agent, version)
   yolofile_path = ""
   ephemeral = false
   publish = []
+  mounts = []
+  allow_absolute_mounts = false
   i = 0
   while i < len(args)
     a = args[i]
@@ -195,6 +249,20 @@ def parse_args(args, ai_agents, default_ai_agent, version)
         os.exit(2)
       end
       publish = append(publish, spec)
+    elsif a == "--mount"
+      i = i + 1
+      if i >= len(args)
+        _err("--mount requires a value (HOST:GUEST[:MODE])")
+        os.exit(2)
+      end
+      m = parse_mount(args[i])
+      if m.err != ""
+        _err("invalid --mount value: '#{args[i]}' (#{m.err})")
+        os.exit(2)
+      end
+      mounts = append(mounts, {host: m.host, guest: m.guest, mode: m.mode})
+    elsif a == "--allow-absolute-mounts"
+      allow_absolute_mounts = true
     elsif a == "--no-provision" || a == "--no-provisioner"
       no_prov = true
     elsif a == "-o" || a == "--output"
@@ -269,14 +337,14 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     end
     i = i + 1
   end
-  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish)
+  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish, mounts, allow_absolute_mounts)
 end
 
 # Build the parsed-args hash. Factored out only because parse_args has two
 # return points (the -h sentinel path and the normal end-of-loop path) and
 # duplicating the 15-field literal twice is asking for drift.
-def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish)
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set, publish: publish}
+def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish, mounts, allow_absolute_mounts)
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set, publish: publish, mounts: mounts, allow_absolute_mounts: allow_absolute_mounts}
 end
 
 # ---------------- Help / version ----------------
@@ -296,9 +364,10 @@ def print_help(default_ai_agent)
   puts "  yolo --no-provision [...]       Skip auto-provisioning (also: --no-provisioner)."
   puts "  yolo --ai-agent [NAME] [...]    Also install an AI agent (default: #{default_ai_agent})."
   puts "                                  Known agents: copilot, opencode."
-  puts "  yolo --backend NAME [...]       Pick a backend: matchlock (microVM, Linux"
-  puts "                                  default), podman (container, GUI/audio capable)"
-  puts "                                  or container (Apple `container`, macOS default)."
+  puts "  yolo --backend NAME [...]       Pick a backend: matchlock (microVM; Linux"
+  puts "                                  default, also runs on macOS/Apple Silicon),"
+  puts "                                  podman (container, GUI/audio capable) or"
+  puts "                                  container (Apple `container`, macOS default)."
   puts "                                  The binding is sticky: once a VM is created the"
   puts "                                  backend is recorded and re-used on attach."
   puts "  yolo --gui [...]                Bind-mount the host Wayland socket into the"
@@ -313,6 +382,17 @@ def print_help(default_ai_agent)
   puts "                                  127.0.0.1). Repeatable; also -p. A bare PORT"
   puts "                                  maps PORT:PORT. Applied at VM creation; the"
   puts "                                  guest service must listen on 0.0.0.0."
+  puts "  yolo --mount HOST:GUEST[:MODE] [...]"
+  puts "                                  Bind-mount an extra host dir into the guest"
+  puts "                                  (on top of $PWD at /work). Repeatable. MODE"
+  puts "                                  is ro|rw (default rw). A relative GUEST lands"
+  puts "                                  under /work; absolute guest paths need the"
+  puts "                                  podman/container backend. Applied at VM"
+  puts "                                  creation."
+  puts "  yolo --allow-absolute-mounts [...]"
+  puts "                                  Permit a Yolofile 'mount:' whose host path"
+  puts "                                  resolves outside the project dir. CLI --mount"
+  puts "                                  paths are always allowed."
   puts "  yolo --disk-size SIZE [...]     Override rootfs disk size for this run."
   puts "                                  Accepts 32G, 32g, 512M, 512m, or a bare"
   puts "                                  MiB integer. Takes effect when the VM is"
@@ -355,7 +435,7 @@ def print_help(default_ai_agent)
   puts "  automatically re-provisions (content-hashed for the marker)."
   puts "  May begin with a YAML-style '---' front matter block declaring"
   puts "  VM-creation overrides (image, cpus, memory, disk-size, backend,"
-  puts "  gui, audio, publish). See docs/05-yolofile.md for the full format."
+  puts "  gui, audio, publish, mount). See docs/05-yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image (default depends on backend)"

@@ -11,7 +11,11 @@ default; see [Backends](./09-backends.md) to choose.
 
 Before installing `yolo` itself:
 
-- **Linux.**
+- **Linux** (this chapter) **or macOS on Apple Silicon.** On macOS the
+  default backend is Apple's `container`; matchlock also runs there (via
+  Virtualization.framework) as an opt-in. See
+  [Backends](./09-backends.md) for the macOS setup; the rest of this
+  chapter covers the Linux/matchlock default.
 - For the **matchlock backend (default):** KVM — `/dev/kvm` must be
   readable and writable by the user that will run `yolo`. On most distros
   adding yourself to the `kvm` group is enough — log out and back in

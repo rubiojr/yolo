@@ -73,6 +73,20 @@ For per-project configuration that travels with the repo, use a
     matchlock rejects them. See
     [Backends § GUI mode](./09-backends.md#gui-mode---gui).
 
+`--mount HOST:GUEST[:MODE]`
+:   Bind-mount an extra host directory into the guest, on top of `$PWD`
+    (which is always at `/work`). Repeatable. `MODE` is `ro` or `rw`
+    (default `rw`). A relative `GUEST` lands under `/work`; absolute guest
+    paths need the `podman`/`container` backend (matchlock confines mounts
+    to `/work`). Applied **at VM creation only**. See
+    [Backends § Mounting host directories](./09-backends.md#mounting-host-directories---mount).
+
+`--allow-absolute-mounts`
+:   Permit a Yolofile `mount:` entry whose **host** path resolves outside
+    the project directory (absolute path or `..` escape). Off by default
+    so an untrusted Yolofile can't mount arbitrary host paths; CLI
+    `--mount` paths are always allowed regardless.
+
 `--provisioner NAME`
 :   Skip auto-detection and force a specific embedded provisioner
     (`fedora-go`, `fedora-rust`, `fedora-ruby`, `fedora-android`).

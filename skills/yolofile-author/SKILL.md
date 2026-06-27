@@ -1,6 +1,6 @@
 ---
 name: yolofile-author
-description: Expert in authoring Yolofiles — per-project provisioning files for yolo dev VMs/containers, combining optional YAML-ish front matter (image, cpus, memory, disk-size, backend, gui, ai-agent) with a bash body run as root in the guest. Load when writing, editing, reviewing, or debugging a Yolofile.
+description: Expert in authoring Yolofiles — per-project provisioning files for yolo dev VMs/containers, combining optional YAML-ish front matter (image, cpus, memory, disk-size, backend, gui, audio, publish, mount, ai-agent) with a bash body run as root in the guest. Load when writing, editing, reviewing, or debugging a Yolofile.
 ---
 
 # Yolofile Author Skill
@@ -66,7 +66,9 @@ dnf -q install go git make
 | `disk-size` (aliases `disk`, `disk_mb`) | size  | `32768` (MiB)      | `64G`, `100g`, `32768` |
 | `backend`                             | string  | `matchlock`        | `matchlock`, `podman` |
 | `gui`                                 | bool    | `false`            | `true`, `false` |
+| `audio`                               | bool    | `false`            | `true`, `false` |
 | `publish`                             | ports   | unset              | `8080`, `8080:80`, `8080:80, 5432:5432` |
+| `mount`                               | mounts  | unset              | `./data:data`, `./conf:etc/app:ro` |
 | `ai-agent`                            | string  | unset              | `opencode`, `copilot`, `none`, `default` |
 | `description`                         | string  | —                  | free-form; ignored by yolo (annotation only) |
 
@@ -84,9 +86,6 @@ flows into a host-side `matchlock run` command, so this blocks injection
 the recorded backend wins over any later front-matter change. To switch,
 `yolo rm` first.
 
-**`gui: true`** only has effect with `backend: podman` (bind-mounts the
-host Wayland socket). It is ignored/refused under matchlock.
-
 **`publish`** forwards guest ports to the host so you can reach a VM
 service. Front matter has no lists, so use a comma-separated value of
 `[HOST:]GUEST` specs: `publish: 8080:80, 5432:5432`. A bare `PORT` means
@@ -95,6 +94,22 @@ value flows into a host-side shell command). Bound to `127.0.0.1` on both
 backends; the **guest** service must listen on `0.0.0.0`. Applied at VM
 creation only (edit → `yolo rm` → `yolo` to change). A CLI `--publish`
 flag replaces this list.
+
+**`mount`** bind-mounts **extra** host directories into the guest, on top
+of `$PWD` (always at `/work`). Comma-separated `HOST:GUEST[:MODE]` specs;
+`MODE` is `ro` or `rw` (default `rw`): `mount: ./data:data, ./conf:etc/app:ro`.
+A **relative** `GUEST` lands under `/work` (`data` → `/work/data`) and is
+portable across backends; an **absolute** `GUEST` works on `podman`/
+`container` but is rejected by `matchlock` (which confines mounts to
+`/work`). For safety, a Yolofile `mount:` **host** path must resolve
+**inside the project directory** — absolute host paths and `..` escapes
+are rejected unless the user runs with `--allow-absolute-mounts` (a
+Yolofile may be fetched from an untrusted URL, so it can't silently mount
+`~/.ssh` or `/`). Applied at VM creation only; a CLI `--mount` replaces
+this list.
+
+**`gui`/`audio`** only take effect with `backend: podman` (bind-mount the
+host Wayland / PipeWire sockets). They are refused under matchlock.
 
 **`ai-agent`** layers an AI coding agent on top of the body. Values:
 a known agent (`opencode`, `copilot`); `default`/`true` (= the built-in

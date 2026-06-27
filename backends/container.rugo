@@ -299,6 +299,24 @@ def _start_impl(opts)
     end
   end
 
+  # Extra host bind-mounts. yolo resolves each {host, guest, mode} to absolute
+  # paths upstream. We use container's `--mount type=bind,source=,target=` long
+  # form (rather than `-v`) so read-only is reliably enforced via `,readonly`.
+  # The whole mount value is single-quoted: its commas are container's option
+  # separators and must survive, which single-quoting preserves (host/target
+  # paths containing ',' are unsupported in this form — same as docker --mount).
+  mount_args = ""
+  ms = opts["mounts"]
+  if ms != nil
+    for m in ms
+      spec = "type=bind,source=" + m["host"] + ",target=" + m["guest"]
+      if m["mode"] == "ro"
+        spec = spec + ",readonly"
+      end
+      mount_args = mount_args + "--mount " + _sh_squote(spec) + " "
+    end
+  end
+
   # Working DNS. Required: container's default per-VM resolver can't reach the
   # internet, so without --dns the guest can't resolve any external name and
   # provisioning (dnf/curl/git) fails. See DEFAULT_DNS / $YOLO_CONTAINER_DNS.
@@ -311,6 +329,7 @@ def _start_impl(opts)
         cpus_arg + " " +
         mem_arg + " " +
         dns_args +
+        mount_args +
         publish_args +
         _sh_squote(img) + " " +
         "sleep infinity"

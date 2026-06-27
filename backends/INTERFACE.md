@@ -69,6 +69,22 @@ be.logs(id, extra)              -> ()          # streams VM/container log to the
                  Backends bind these on `127.0.0.1` (loopback) — never
                  `0.0.0.0`. The list may be empty. Honoured by every backend;
                  there is no capability flag for it.
+- `mounts`     — list of extra host bind-mounts, each a hash
+                 `{host, guest, mode}`:
+                 - `host`  — absolute host path, already resolved upstream.
+                 - `guest` — absolute guest path. yolo resolves a relative
+                   spec against the workspace, so by the time it reaches a
+                   backend `guest` is always absolute (e.g. `/work/data`).
+                 - `mode`  — `"ro"` or `"rw"` (validated upstream; never
+                   free-form, so safe to map to a backend token).
+                 `host`/`guest` are arbitrary paths and **must be
+                 shell-quoted** by the backend before splicing. The list may
+                 be empty. Honoured by every backend; no capability flag.
+                 A backend that can only mount under the workspace (matchlock)
+                 must reject a `guest` that is not under `workspace` with a
+                 friendly error. Relative guest specs are resolved against the
+                 workspace upstream, so they always satisfy that invariant —
+                 only an explicit absolute `guest` can violate it.
 
 ## Exec channels
 

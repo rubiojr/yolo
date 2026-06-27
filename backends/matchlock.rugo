@@ -90,6 +90,31 @@ def _start_impl(opts)
     end
   end
 
+  # Extra host bind-mounts. yolo resolves each {host, guest, mode} to absolute
+  # paths upstream; here we only translate to matchlock's `-v HOST:GUEST:TOKEN`
+  # form (TOKEN is `host_fs` for rw, `ro` for read-only) and enforce matchlock's
+  # one hard constraint: every mount must live under the workspace. host/guest
+  # never contain ':' (the upstream spec parser splits on ':' and would have
+  # rejected such a path), so they are safe to splice into matchlock's
+  # ':'-delimited value; we single-quote them anyway to survive spaces.
+  mount_arg = ""
+  ms = opts["mounts"]
+  if ms != nil
+    for m in ms
+      g = m["guest"]
+      if g != ws && !str.starts_with(g, ws + "/")
+        _err("matchlock can only mount under the workspace (#{ws}); guest path '#{g}' is outside it")
+        _err("use a relative guest path (placed under #{ws}) or switch to --backend podman")
+        os.exit(2)
+      end
+      tok = "host_fs"
+      if m["mode"] == "ro"
+        tok = "ro"
+      end
+      mount_arg = mount_arg + " -v " + _sh_squote(m["host"] + ":" + g + ":" + tok)
+    end
+  end
+
   # --rm=false is required for `matchlock exec` to work afterwards: ephemeral
   # (`--rm=true`, the default in some matchlock paths) VMs do not create the
   # exec relay socket, and the next `matchlock exec <id>` errors out with
@@ -109,6 +134,7 @@ def _start_impl(opts)
       #{allow_arg} \
       #{user_arg} \
       #{publish_arg} \
+      #{mount_arg} \
       --rm=false \
       -d 2>&1
   SH
@@ -163,14 +189,44 @@ end
 # Wait for the socket to appear before returning. First-boot can take 30s+
 # because of the image pull, so we tolerate a long deadline.
 EXEC_SOCK_TIMEOUT_S = 120
+# Look up the matchlock-reported status of a single VM ("running", "stopped",
+# …) via the same `matchlock list` parse used elsewhere. Returns "" if the VM
+# isn't listed (which can happen transiently right after `run -d`).
+def _status_of(id)
+  rows = _list_table_impl()
+  row = rows[id]
+  if row == nil
+    return ""
+  end
+  return row[0]
+end
+
 def _wait_ready_impl(id)
   home = os.getenv("HOME")
   sock = "#{home}/.matchlock/vms/#{id}/exec.sock"
   start = time.now()
   notified = false
+  # Throttle the `matchlock list` status probe (a subprocess) to ~1/s while the
+  # tight loop polls the socket every 0.2s. Seed it to `start` so the first
+  # probe is ~1s in, past any brief registration race after `run -d`.
+  last_status = start
   while time.now() - start < EXEC_SOCK_TIMEOUT_S
     if os.file_exists(sock)
       return
+    end
+    # Fast-fail: a healthy VM stays "running" while matchlock creates the exec
+    # socket in the background. If it has gone "stopped"/"crashed"/failed
+    # instead, the socket will never appear (e.g. the VM couldn't boot — no KVM
+    # on Linux, no Virtualization.framework hypervisor on macOS, or a broken
+    # guest-init), so don't burn the full 120s deadline waiting for it.
+    if time.now() - last_status >= 1
+      last_status = time.now()
+      st = _status_of(id)
+      if st == "stopped" || st == "crashed" || st == "exited" || st == "failed" || st == "error"
+        _err("matchlock VM #{id} is '#{st}' — it failed to boot, so the exec socket will never appear")
+        _err("inspect the cause with: matchlock logs #{id}   (or: matchlock inspect #{id})")
+        os.exit(1)
+      end
     end
     if !notified && time.now() - start > 3
       _log("waiting for matchlock exec socket (first boot can take a while)…")

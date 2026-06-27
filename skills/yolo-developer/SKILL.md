@@ -143,6 +143,9 @@ Per-name state lives in `$XDG_RUNTIME_DIR/yolo/` (fallback `/tmp/yolo/`):
 <name>.applied   # line 1 = vm-id; subsequent lines = applied markers
 <name>.cwd       # host cwd recorded at first attach (for `ls` display)
 <name>.image     # per-name image pin (set by `yolo import`)
+<name>.mounts    # extra bind-mounts the VM was created with; reattach warns if
+                 # the active Yolofile/--mount set differs (mounts are fixed at
+                 # creation — no backend can hot-add one)
 <name>.lock/     # mkdir-based inter-process lock (with pid + label files)
 ```
 

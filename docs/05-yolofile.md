@@ -251,11 +251,11 @@ Rules and behaviour:
 
 - `:` is the field separator; host or guest paths that themselves contain
   `:` are not supported in this short form (the same limitation `docker
-  -v` has). Likewise, because the list is comma-separated, paths
-  containing `,` cannot be expressed here.
+  -v` has). Paths containing `,` cannot be expressed here either.
 - Mounting happens at **VM creation** only (like `cpus` / `publish`).
-  Editing `mount:` does **not** remount on an existing VM — `yolo rm`
-  then `yolo` to apply the change.
+  Editing `mount:` does **not** remount on an existing VM — no backend can
+  hot-add a mount to a running VM/container. yolo detects the change on
+  reattach and prints a warning; run `yolo rm` then `yolo` to apply it.
 - A CLI `--mount` flag (any number of them) **replaces** the front-matter
   list for that run, consistent with `--publish`.
 - Backend support and the matchlock workspace restriction are covered in

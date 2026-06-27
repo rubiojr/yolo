@@ -44,6 +44,7 @@ VM (`yolo`, `yolo --`, `yolo provision`, `yolo export`), so a
 <name>.applied    # vm-id + provisioner marker(s) already applied
 <name>.cwd        # host cwd recorded at first attach (for display)
 <name>.image      # per-name image pin (set by `yolo import`)
+<name>.mounts     # extra bind-mounts the VM was created with (change detection)
 ```
 
 `<name>.backend` was added when the second backend landed. If it's

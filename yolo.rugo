@@ -500,6 +500,7 @@ def start_vm(name)
   os.write_file(state_file(name), id)
   write_backend(name, be.NAME)
   record_cwd(name)
+  record_mounts(name)
   # If an imported `.applied` file is waiting with the __IMPORTED__ sentinel,
   # rewrite its first line to the new vm-id so the markers stick to this VM
   # and provisioners skip re-running (their effects are already in the image).
@@ -595,6 +596,47 @@ end
 
 def record_cwd(name)
   os.write_file(cwd_file(name), host_workspace)
+end
+
+# Per-name record of the extra bind-mounts the VM was *created* with. Mounts
+# can only be applied at creation (no backend can hot-add a bind-mount to a
+# running VM/container), so we snapshot the resolved set here and compare it on
+# every reattach to warn when the active Yolofile / --mount no longer matches.
+def mounts_file(name)
+  return filepath.join(STATE_DIR, "#{name}.mounts")
+end
+
+# Canonical, stable serialization of the current effective `mounts` (one
+# "host\tguest\tmode" per line). Empty when there are no extra mounts — we
+# still record that, so later *adding* a mount is detected as a change.
+def mounts_signature
+  lines = []
+  for m in mounts
+    lines = append(lines, m["host"] + "\t" + m["guest"] + "\t" + m["mode"])
+  end
+  return str.join(lines, "\n")
+end
+
+# Snapshot the mount set used to create this VM. Always writes (even empty).
+def record_mounts(name)
+  os.write_file(mounts_file(name), mounts_signature())
+end
+
+# Warn when reattaching to an existing VM whose recorded mount set differs from
+# what the active Yolofile / --mount now resolves to. Backends cannot change
+# mounts on a live instance, so the only way to apply the change is to recreate.
+# Silent no-op when there is no recorded snapshot (VM predates this feature).
+def warn_if_mounts_changed(name)
+  path = mounts_file(name)
+  if !os.file_exists(path)
+    return
+  end
+  recorded = os.read_file(path)
+  if recorded == mounts_signature()
+    return
+  end
+  warn("mounts changed since this VM was created — the running VM still uses the old set")
+  warn("recreate it to apply the new mounts:  yolo rm  (then run yolo again)")
 end
 
 def read_state(name)
@@ -893,6 +935,10 @@ def cmd_rm(name)
   if os.file_exists(cf)
     os.remove(cf)
   end
+  mf = mounts_file(name)
+  if os.file_exists(mf)
+    os.remove(mf)
+  end
   remove_image(name)
   # If the pinned image was created by `yolo import`, drop it from the
   # backend's image store too — but only when no other yolo name still pins
@@ -1087,6 +1133,10 @@ def cmd_attach(name, passthrough, prov_name, no_prov, agent_name)
   acquire_lock(name, "setup")
   id = ensure_vm(name)
   be = backend_for(name)
+  # ensure_vm reuses a running VM as-is. Mounts are fixed at creation, so flag
+  # a Yolofile/--mount change that the live VM can't pick up (start_vm just
+  # recorded the current set, so a freshly created VM never trips this).
+  warn_if_mounts_changed(name)
 
   if !no_prov
     # Resolve once. marker is content-hashed so source edits trigger a re-run.

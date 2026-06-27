@@ -216,15 +216,18 @@ Bind-mount one or more **extra** host directories into the guest, in
 addition to your `$PWD` (which is always mounted at `/work`). Equivalent
 to passing `--mount` on the command line.
 
-Front matter can't express lists, so `mount` takes a **comma-separated**
-value. Each entry is `HOST:GUEST[:MODE]`:
+To mount more than one directory, repeat the `mount:` key — **one mount
+per line**. Each entry is `HOST:GUEST[:MODE]`:
 
 ```bash
 ---
 # mount ./data read-write at /work/data, and ./conf read-only at /work/etc/app
-mount: ./data:data, ./conf:etc/app:ro
+mount: ./data:data
+mount: ./conf:etc/app:ro
 ---
 ```
+
+(A comma is **not** a separator and is rejected inside a path.)
 
 - **`HOST`** — the host directory to share. In front matter it **must
   resolve to a path inside the project directory** (the directory the

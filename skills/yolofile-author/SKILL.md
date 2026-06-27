@@ -96,8 +96,15 @@ creation only (edit → `yolo rm` → `yolo` to change). A CLI `--publish`
 flag replaces this list.
 
 **`mount`** bind-mounts **extra** host directories into the guest, on top
-of `$PWD` (always at `/work`). Comma-separated `HOST:GUEST[:MODE]` specs;
-`MODE` is `ro` or `rw` (default `rw`): `mount: ./data:data, ./conf:etc/app:ro`.
+of `$PWD` (always at `/work`). Repeat the key — **one `HOST:GUEST[:MODE]`
+per line**; `MODE` is `ro` or `rw` (default `rw`):
+
+```
+mount: ./data:data
+mount: ./conf:etc/app:ro
+```
+
+(A comma is not a separator and is rejected inside a path.)
 A **relative** `GUEST` lands under `/work` (`data` → `/work/data`) and is
 portable across backends; an **absolute** `GUEST` works on `podman`/
 `container` but is rejected by `matchlock` (which confines mounts to

@@ -162,8 +162,7 @@ def _parse_mount(s)
   # Reject commas in paths: the container backend renders mounts as
   # `--mount type=bind,source=HOST,target=GUEST`, where comma separates
   # options — a path containing ',' could otherwise smuggle in extra mount
-  # options. (Front-matter `mount:` is also comma-separated, so a ',' here is
-  # ambiguous regardless.)
+  # options.
   if str.index(host, ",") >= 0 || str.index(guest, ",") >= 0
     bad.err = "',' is not allowed in a mount path"
     return bad
@@ -240,8 +239,10 @@ end
 # Returns {fm: {normalized_key => value, ...}, body: "rest of file", err: ""}.
 # Keys are lowercased and `-` is rewritten to `_`. Values are trimmed and
 # have optional surrounding quotes stripped. Lines starting with `#` and
-# blank lines inside the front matter block are ignored. If the file does
-# not start with `---`, the fast path returns {fm: {}, body: content, err: ""}
+# blank lines inside the front matter block are ignored. `mount:` may be
+# repeated (one mount per line); every other key is last-wins. If the file
+# does not start with `---`, the fast path returns {fm: {}, body: content,
+# err: ""}
 # so the bash body is bit-identical (and its sha256 unchanged) for existing
 # pre-front-matter Yolofiles. An opening `---` without a matching closing
 # `---` is an error — better than executing `---` as bash.
@@ -277,7 +278,14 @@ def parse_content(content)
         k = str.lower(str.trim(str.slice(t, 0, idx)))
         k = str.replace(k, "-", "_")
         v = _unquote(str.trim(str.slice(t, idx + 1, len(t))))
-        fm[k] = v
+        # `mount:` is the one repeatable key: write one mount per line and
+        # they accumulate (joined with "\n", split back apart in validate()).
+        # Every other key keeps last-wins semantics.
+        if k == "mount" && fm[k] != nil && fm[k] != ""
+          fm[k] = fm[k] + "\n" + v
+        else
+          fm[k] = v
+        end
       end
     end
     i = i + 1
@@ -426,15 +434,19 @@ def validate(fm, backends, ai_agents, default_ai_agent)
       end
     end
   end
-  # Front matter can't express lists, so accept a comma-separated value:
-  #   mount: ./data:data, ./conf:etc/app:ro
+  # `mount:` is repeatable — one bind-mount per line. parse_content joins the
+  # repeated lines with "\n"; we split them back apart here. Comma is NOT a
+  # separator (and is rejected inside a path by _parse_mount), so a guest/host
+  # path may not contain ','.
+  #   mount: ./data:data
+  #   mount: ./conf:etc/app:ro
   # Only the syntax is validated here. yolo.rugo resolves each host/guest to an
   # absolute path, enforces the matchlock-under-/work rule, and applies the
   # host-containment gate (Yolofile mounts must stay inside $PWD unless
   # --allow-absolute-mounts) — none of which this pure module can see.
   v_mount = fm["mount"]
   if v_mount != nil && v_mount != ""
-    for part in str.split(v_mount, ",")
+    for part in str.split(v_mount, "\n")
       if str.trim(part) != ""
         m = _parse_mount(part)
         if m.err != ""

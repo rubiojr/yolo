@@ -164,8 +164,8 @@ def parse_mount(s)
   # Reject commas in paths: the container backend renders mounts as
   # `--mount type=bind,source=HOST,target=GUEST`, where comma separates
   # options — a path containing ',' could otherwise smuggle in extra mount
-  # options (and front-matter `mount:` is comma-separated besides). ':' can't
-  # occur here (it's the field separator, already consumed by the split above).
+  # options. ':' can't occur here (it's the field separator, already consumed
+  # by the split above).
   if str.index(host, ",") >= 0 || str.index(guest, ",") >= 0
     bad.err = "',' is not allowed in a mount path"
     return bad

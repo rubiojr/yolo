@@ -1,5 +1,5 @@
 # ---------------- Config ----------------
 # Bump this on every release tag (also bumped by hand on `main` after a
 # release so `main` builds advertise a `-dev` suffix).
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 

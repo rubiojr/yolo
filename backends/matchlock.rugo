@@ -13,6 +13,8 @@ use "fmt"
 use "filepath"
 use "conv"
 use "time"
+use "http"
+use "crypto"
 
 # Matchlock-specific embedded helpers. Paths are relative to the rugo entry
 # point (yolo.rugo at the repo root), per rugo's `embed` resolution rules.
@@ -63,8 +65,9 @@ end
 # Ensure the container-complete kernel is present locally, downloading it from
 # the release once and caching it for reuse. The download is verified against a
 # `.sha256` sidecar published next to the kernel asset; a mismatch (corrupted or
-# tampered download) aborts. Returns a matchlock --kernel ref
-# ("file:///abs/path"). Exits with a friendly message on failure.
+# tampered download) aborts. Uses rugo's native http/crypto — no curl/shasum on
+# the host. Returns a matchlock --kernel ref ("file:///abs/path"). Exits with a
+# friendly message on failure.
 def _ensure_kernel
   release = os.getenv("YOLO_MATCHLOCK_KERNEL_RELEASE")
   if release == ""
@@ -83,74 +86,71 @@ def _ensure_kernel
   end
   url    = "#{baseurl}/#{release}/#{asset}"
   sumurl = "#{url}.sha256"
-  tmp    = "#{path}.tmp.#{os.pid()}"
-  sumtmp = "#{tmp}.sha256"
   _log("downloading container kernel #{release}/#{asset} (one-time)…")
 
   # 1. kernel
-  dl = "mkdir -p " + _sh_squote(dir) +
-       " && curl -fSL --retry 3 -o " + _sh_squote(tmp) + " " + _sh_squote(url)
-  rc = try os.exec(dl) or "FAILED"
-  if rc == "FAILED" || !os.file_exists(tmp)
-    _kernel_dl_cleanup(tmp, sumtmp)
-    _err("failed to download the container kernel:")
+  resp = try http.get(url) or nil
+  if resp == nil || resp.status_code != 200
+    _err("failed to download the container kernel (#{_http_status(resp)}):")
     _err("  #{url}")
     _kernel_dl_hint()
     os.exit(1)
   end
+  data = resp.body
 
-  # 2. checksum sidecar
-  dls = "curl -fSL --retry 3 -o " + _sh_squote(sumtmp) + " " + _sh_squote(sumurl)
-  rc2 = try os.exec(dls) or "FAILED"
-  if rc2 == "FAILED" || !os.file_exists(sumtmp)
-    _kernel_dl_cleanup(tmp, sumtmp)
-    _err("failed to download the container kernel checksum:")
+  # 2. checksum sidecar (sha256sum/shasum format: "<hex>  <name>")
+  sresp = try http.get(sumurl) or nil
+  if sresp == nil || sresp.status_code != 200
+    _err("failed to download the container kernel checksum (#{_http_status(sresp)}):")
     _err("  #{sumurl}")
     _kernel_dl_hint()
     os.exit(1)
   end
+  expected = str.lower(_first_field(sresp.body))
 
-  # 3. verify. The sidecar is in `sha256sum`/`shasum -a 256` format
-  # ("<hex>  <name>"); take the first field and compare against the computed
-  # digest (sha256sum on Linux, shasum on macOS). `set -e` + the final `test`
-  # make any failure — including a mismatch — a non-zero exit.
-  verify = "set -e\n" +
-    "expected=$(awk '{print $1; exit}' " + _sh_squote(sumtmp) + ")\n" +
-    "if command -v sha256sum >/dev/null 2>&1; then\n" +
-    "  actual=$(sha256sum " + _sh_squote(tmp) + " | awk '{print $1}')\n" +
-    "else\n" +
-    "  actual=$(shasum -a 256 " + _sh_squote(tmp) + " | awk '{print $1}')\n" +
-    "fi\n" +
-    "test -n \"$expected\"\n" +
-    "test \"$expected\" = \"$actual\"\n"
-  rcv = try os.exec("bash -c " + _sh_squote(verify)) or "FAILED"
-  if rcv == "FAILED"
-    _kernel_dl_cleanup(tmp, sumtmp)
+  # 3. verify
+  actual = str.lower(crypto.sha256(data))
+  if expected == "" || expected != actual
     _err("container kernel checksum mismatch — refusing a corrupted or tampered download.")
     _err("  #{url}")
     _err("  #{sumurl}")
     os.exit(1)
   end
 
-  # 4. install atomically, drop the sidecar temp.
-  rc3 = try os.exec("mv " + _sh_squote(tmp) + " " + _sh_squote(path)) or "FAILED"
-  _kernel_dl_cleanup("", sumtmp)
-  if rc3 == "FAILED" || !os.file_exists(path)
-    _kernel_dl_cleanup(tmp, sumtmp)
+  # 4. install atomically: write a temp then rename into place.
+  try os.mkdir(dir) or nil
+  tmp = "#{path}.tmp.#{os.pid()}"
+  wok = try os.write_file(tmp, data) or "ERR"
+  if wok == "ERR"
+    _err("failed to write the container kernel to #{tmp}")
+    os.exit(1)
+  end
+  rok = try os.rename(tmp, path) or "ERR"
+  if rok == "ERR" || !os.file_exists(path)
+    try os.remove(tmp) or nil
     _err("failed to install the container kernel to #{path}")
     os.exit(1)
   end
+  _log("verified checksum and cached container kernel #{release}/#{asset}")
   return "file://#{path}"
 end
 
-# Best-effort removal of the kernel/sidecar temp files (either may be "").
-def _kernel_dl_cleanup(tmp, sumtmp)
-  if tmp != ""
-    try os.exec("rm -f " + _sh_squote(tmp)) or nil
+# First whitespace-delimited token of `s` — the hash in a "<hex>  <name>"
+# checksum sidecar (also handles a bare hash or a leading "*" binary marker).
+def _first_field(s)
+  parts = str.fields(str.trim(s))
+  if len(parts) == 0
+    return ""
   end
-  if sumtmp != ""
-    try os.exec("rm -f " + _sh_squote(sumtmp)) or nil
+  return parts[0]
+end
+
+# Short "HTTP <code>" / "no response" label for a failed http.get, for errors.
+def _http_status(resp)
+  if resp == nil
+    return "no response"
   end
+  return "HTTP #{resp.status_code}"
 end
 
 def _kernel_dl_hint

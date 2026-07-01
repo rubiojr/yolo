@@ -1,2 +1,5 @@
 .kata.local.toml
 /yolo
+
+# Build artifacts (e.g. guest kernels from scripts/build-kernels.sh)
+/tmp/

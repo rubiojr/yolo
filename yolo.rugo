@@ -1930,6 +1930,10 @@ applies_resources = (sub == "" || sub == "provision" || sub == "export")
 # global once both sources have been considered.
 raw_mounts = []
 mounts_from_cli = false
+# Whether matchlock privileged mode is requested (Yolofile `privileged:` or the
+# `--matchlock-privileged` flag). Combined below; gated against the resolved
+# backend before any VM is created.
+want_privileged = false
 if applies_resources && active_yolofile_exists()
   yf_parsed = parse_active_yolofile()
   if yf_parsed.err != ""
@@ -1958,6 +1962,9 @@ if applies_resources && active_yolofile_exists()
   if fm_resolved.audio_set
     audio_enabled = fm_resolved.audio
   end
+  if fm_resolved.privileged_set
+    want_privileged = fm_resolved.privileged
+  end
   if len(fm_resolved.publish) > 0
     publish_ports = fm_resolved.publish
   end
@@ -1977,6 +1984,21 @@ if parsed.disk_mb != ""
 end
 if parsed.backend != ""
   backend_sel = parsed.backend
+end
+# Matchlock-only settings are forwarded to the env the matchlock backend reads
+# (like the container backend's YOLO_CONTAINER_DNS) rather than threaded through
+# the generic backend `opts` contract. Precedence: the --matchlock-privileged
+# flag wins over the Yolofile `privileged:` key. (The bare YOLO_MATCHLOCK_* env
+# vars are read by the backend directly and are silently ignored off matchlock;
+# the flag and the Yolofile key are explicit intent and are gated below.)
+if parsed.matchlock_kernel != ""
+  os.setenv("YOLO_MATCHLOCK_KERNEL", parsed.matchlock_kernel)
+end
+if parsed.matchlock_privileged
+  want_privileged = true
+end
+if want_privileged
+  os.setenv("YOLO_MATCHLOCK_PRIVILEGED", "1")
 end
 if parsed.gui_set
   gui_enabled = parsed.gui
@@ -2021,6 +2043,26 @@ if parsed.ephemeral
 elsif name == ""
   name = default_name()
 end
+
+# Matchlock-only options (privileged mode, a custom kernel) must fail loudly
+# rather than be silently ignored on another backend. Check once the effective
+# backend for this VM is known, for the operations that actually create/use it.
+if sub == "" || sub == "provision"
+  want_kernel = parsed.matchlock_kernel != ""
+  if want_privileged || want_kernel
+    eff_backend = resolve_backend_name(name)
+    if eff_backend != "matchlock"
+      what = "--matchlock-kernel"
+      if want_privileged
+        what = "privileged mode (Yolofile 'privileged:' / --matchlock-privileged)"
+      end
+      err_("#{what} requires the matchlock backend, but '#{name}' uses '#{eff_backend}'.")
+      err_("select matchlock with --backend matchlock (or a Yolofile 'backend: matchlock').")
+      os.exit(2)
+    end
+  end
+end
+
 if sub == "ls"
   cmd_ls()
 elsif sub == "du"

@@ -215,6 +215,8 @@ def parse_args(args, ai_agents, default_ai_agent, version)
   publish = []
   mounts = []
   allow_absolute_mounts = false
+  matchlock_kernel = ""
+  matchlock_privileged = false
   i = 0
   while i < len(args)
     a = args[i]
@@ -277,6 +279,15 @@ def parse_args(args, ai_agents, default_ai_agent, version)
         os.exit(2)
       end
       backend = args[i]
+    elsif a == "--matchlock-privileged"
+      matchlock_privileged = true
+    elsif a == "--matchlock-kernel"
+      i = i + 1
+      if i >= len(args)
+        _err("--matchlock-kernel requires a ref (file:///abs/path or an OCI image)")
+        os.exit(2)
+      end
+      matchlock_kernel = args[i]
     elsif a == "--gui"
       gui = true
       gui_set = true
@@ -337,14 +348,14 @@ def parse_args(args, ai_agents, default_ai_agent, version)
     end
     i = i + 1
   end
-  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish, mounts, allow_absolute_mounts)
+  return _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb_override, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish, mounts, allow_absolute_mounts, matchlock_kernel, matchlock_privileged)
 end
 
 # Build the parsed-args hash. Factored out only because parse_args has two
 # return points (the -h sentinel path and the normal end-of-loop path) and
 # duplicating the 15-field literal twice is asking for drift.
-def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish, mounts, allow_absolute_mounts)
-  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set, publish: publish, mounts: mounts, allow_absolute_mounts: allow_absolute_mounts}
+def _result(sub, name, prov, no_prov, agent, agent_set, rest, passthrough, out_path, force, disk_mb, backend, gui, gui_set, yolofile_path, ephemeral, audio, audio_set, publish, mounts, allow_absolute_mounts, matchlock_kernel, matchlock_privileged)
+  return {sub: sub, name: name, prov: prov, no_prov: no_prov, agent: agent, agent_set: agent_set, rest: rest, passthrough: passthrough, out_path: out_path, force: force, disk_mb: disk_mb, backend: backend, gui: gui, gui_set: gui_set, yolofile_path: yolofile_path, ephemeral: ephemeral, audio: audio, audio_set: audio_set, publish: publish, mounts: mounts, allow_absolute_mounts: allow_absolute_mounts, matchlock_kernel: matchlock_kernel, matchlock_privileged: matchlock_privileged}
 end
 
 # ---------------- Help / version ----------------
@@ -370,6 +381,15 @@ def print_help(default_ai_agent)
   puts "                                  container (Apple `container`, macOS default)."
   puts "                                  The binding is sticky: once a VM is created the"
   puts "                                  backend is recorded and re-used on attach."
+  puts "  yolo --matchlock-privileged [...]"
+  puts "                                  (matchlock) Run the VM privileged so it can"
+  puts "                                  host Podman/Docker. Downloads a container-"
+  puts "                                  ready guest kernel on first use. Also"
+  puts "                                  YOLO_MATCHLOCK_PRIVILEGED=1."
+  puts "  yolo --matchlock-kernel REF [...]"
+  puts "                                  (matchlock) Boot a specific guest kernel"
+  puts "                                  (file:///abs/path or an OCI ref) instead of"
+  puts "                                  the auto-downloaded one. Also YOLO_MATCHLOCK_KERNEL."
   puts "  yolo --gui [...]                Bind-mount the host Wayland socket into the"
   puts "                                  guest so graphical apps render on your"
   puts "                                  compositor. Requires --backend podman."
@@ -435,7 +455,7 @@ def print_help(default_ai_agent)
   puts "  automatically re-provisions (content-hashed for the marker)."
   puts "  May begin with a YAML-style '---' front matter block declaring"
   puts "  VM-creation overrides (image, cpus, memory, disk-size, backend,"
-  puts "  gui, audio, publish, mount). See docs/05-yolofile.md for the full format."
+  puts "  gui, audio, privileged, publish, mount). See docs/05-yolofile.md for the full format."
   puts ""
   puts "Env vars (defaults):"
   puts "  YOLO_IMAGE=fedora:44       OCI image (default depends on backend)"
@@ -448,4 +468,6 @@ def print_help(default_ai_agent)
   puts "  YOLO_NAME=                 Override the auto-derived per-CWD name"
   puts "  YOLO_BACKEND=              Default backend (matchlock/Linux, container/macOS)"
   puts "  YOLO_CONTAINER_DNS=1.1.1.1  Nameserver(s) for the container backend (space-sep)"
+  puts "  YOLO_MATCHLOCK_PRIVILEGED= Run matchlock VMs privileged (host Podman/Docker)"
+  puts "  YOLO_MATCHLOCK_KERNEL=     Custom matchlock guest kernel (file://path or ref)"
 end

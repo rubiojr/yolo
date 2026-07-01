@@ -47,6 +47,8 @@ For per-project configuration that travels with the repo, use a
 | `YOLO_USER`       | unset          | Pass `--user uid:gid` to matchlock for non-root execution. |
 | `YOLO_ALLOW`      | unset          | Enables matchlock's MITM allow-list mode — see [Networking](./06-networking.md). |
 | `YOLO_CONTAINER_DNS` | `1.1.1.1`   | Nameserver(s) for the `container` backend (space-separated). Injected as `--dns` because container's per-VM resolver can't reach external names. See [Backends](./09-backends.md). |
+| `YOLO_MATCHLOCK_PRIVILEGED` | unset | `1`/`true` runs matchlock VMs privileged so they can host Podman/Docker; yolo then boots a container-ready guest kernel (auto-downloaded, cached). Matchlock only. See the [Podman cookbook](./cookbook/01-podman.md). |
+| `YOLO_MATCHLOCK_KERNEL` | unset  | Custom matchlock guest kernel (`file:///abs/path` or an OCI ref) instead of the auto-downloaded one. Matchlock only. |
 | `YOLO_GO_VERSION` | _latest_       | Pin the Go version in `fedora-go`. Default resolves `https://go.dev/VERSION?m=text`. |
 | `XDG_RUNTIME_DIR` | `/tmp`         | Where `yolo` keeps its name → vm-id state files. |
 
@@ -72,6 +74,15 @@ For per-project configuration that travels with the repo, use a
     sockets (`--audio`) into the guest. **podman backend only**;
     matchlock rejects them. See
     [Backends § GUI mode](./09-backends.md#gui-mode---gui).
+
+`--matchlock-privileged` / `--matchlock-kernel REF`
+:   **matchlock backend only.** `--matchlock-privileged` runs the VM
+    privileged so it can host Podman/Docker (yolo then auto-downloads a
+    container-ready guest kernel); `--matchlock-kernel` boots a specific
+    kernel (`file:///abs/path` or an OCI ref) instead. Both error if the
+    resolved backend isn't matchlock. `--matchlock-privileged` is the
+    per-run form of the Yolofile `privileged: true` key. See the
+    [Podman cookbook](./cookbook/01-podman.md).
 
 `--mount HOST:GUEST[:MODE]`
 :   Bind-mount an extra host directory into the guest, on top of `$PWD`

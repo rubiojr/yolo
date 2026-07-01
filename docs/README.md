@@ -22,5 +22,12 @@ A chapter-by-chapter tour of `yolo`, in reading order.
    podman (containers, GUI apps), capability matrix, how the abstraction
    is wired together.
 
+## Cookbook
+
+Task-focused recipes for specific setups:
+
+1. [Podman on matchlock](./cookbook/01-podman.md) — run Podman inside a
+   matchlock microVM (container-complete guest kernel + privileged mode).
+
 For internals (auto-heal algorithm, state file layout, provisioner
 markers, project source layout) see [architecture.md](./architecture.md).

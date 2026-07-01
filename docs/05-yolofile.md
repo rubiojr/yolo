@@ -128,6 +128,7 @@ a single `key: value` pair.
 | `backend`                                | string  | `matchlock`  | `matchlock`, `podman`                   |
 | `gui`                                    | bool    | `false`      | `true`, `false`                         |
 | `audio`                                  | bool    | `false`      | `true`, `false`                         |
+| `privileged`                             | bool    | `false`      | `true`, `false`                         |
 | `publish`                                | ports   | *(none)*     | `8080`, `8080:80`, `8080:80, 5432:5432` |
 | `mount`                                  | mounts  | *(none)*     | `./data:data`, `./conf:etc/app:ro`      |
 | `ai-agent`                               | string  | *(unset)*    | `opencode`, `copilot`, `none`, `default` |
@@ -165,6 +166,16 @@ without `gui`. Has no effect when `backend` is `matchlock` (it would
 refuse the invocation; see `--audio` in `yolo --help`). Apps that use
 ALSA directly need an ALSA→Pulse bridge in the image; see
 [Backends](./09-backends.md#audio-passthrough---audio).
+
+#### `privileged`
+
+Boolean, **matchlock only**. When `true`, the microVM runs privileged
+(matchlock's in-guest sandbox is skipped) so it can host a container engine
+like Podman or Docker, and yolo boots a container-ready guest kernel
+(downloaded once and cached). Setting `privileged: true` with any other
+backend is an error — the run stops with a message telling you to select
+matchlock. Equivalent to `--matchlock-privileged` on the command line. See
+the [Podman cookbook](./cookbook/01-podman.md).
 
 #### `publish`
 

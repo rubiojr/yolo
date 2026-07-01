@@ -67,9 +67,26 @@ To migrate an existing binding to a different backend, you must
 ## When to use matchlock
 
 - You want **kernel-level isolation** for the workspace.
+- You want to run **Podman or Docker inside** the dev environment. Because
+  matchlock is a real VM (its own kernel, real root), it can host a container
+  engine — unlike the container backends, which share a kernel. This needs
+  privileged mode (`privileged: true` / `--matchlock-privileged`); see the
+  [Podman cookbook](./cookbook/01-podman.md).
 - You need `yolo export` / `yolo import` to move a fully provisioned
   environment between hosts.
 - You want **egress allow-listing** via `YOLO_ALLOW`.
+
+### Privileged mode (containers-in-VM)
+
+`privileged: true` (Yolofile) or `--matchlock-privileged` (also
+`YOLO_MATCHLOCK_PRIVILEGED=1`) runs the microVM privileged — matchlock's
+in-guest sandbox is skipped so a container runtime can create namespaces — and
+boots a container-ready guest kernel that yolo downloads once and caches under
+`~/.cache/yolo/kernels/` (verified against a published `.sha256`). Point
+`--matchlock-kernel file:///abs/path` (or `YOLO_MATCHLOCK_KERNEL`) at a kernel
+you built yourself with `scripts/build-kernels.sh` to skip the download. These
+settings are matchlock-only and error on any other backend. Full walkthrough:
+the [Podman cookbook](./cookbook/01-podman.md).
 
 ### matchlock on macOS (Apple Silicon)
 

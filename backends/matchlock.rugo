@@ -35,6 +35,128 @@ def _err(msg)
   puts "#{prefix} #{color.red(msg)}"
 end
 
+# ---------------- Guest kernel (privileged mode) ----------------
+# Running containers (Docker/Podman) in a matchlock VM needs a
+# container-complete guest kernel — the stock matchlock kernel omits
+# CONFIG_NFT_FIB_INET, so Podman's netavark bridge networking fails. yolo ships
+# such a kernel (built from guest/kernel/*.config) as a release asset and, in
+# privileged mode, downloads it once and caches it under
+# $HOME/.cache/yolo/kernels/<release>/ for reuse. No end-user build step.
+#
+# Overridable: $YOLO_MATCHLOCK_KERNEL (explicit ref, skips the download),
+# $YOLO_MATCHLOCK_KERNEL_RELEASE (release tag), $YOLO_MATCHLOCK_KERNEL_BASEURL
+# (asset mirror).
+KERNEL_RELEASE = "v0.10.0"
+KERNEL_BASEURL = "https://github.com/rubiojr/yolo/releases/download"
+
+# Published kernel asset name for the host architecture. arm64 boots on
+# Virtualization.framework; everything else uses the x86_64 (Firecracker) build.
+def _kernel_asset
+  out = try `uname -m` or ""
+  m = str.trim(out)
+  if m == "arm64" || m == "aarch64"
+    return "kernel-arm64"
+  end
+  return "kernel"
+end
+
+# Ensure the container-complete kernel is present locally, downloading it from
+# the release once and caching it for reuse. The download is verified against a
+# `.sha256` sidecar published next to the kernel asset; a mismatch (corrupted or
+# tampered download) aborts. Returns a matchlock --kernel ref
+# ("file:///abs/path"). Exits with a friendly message on failure.
+def _ensure_kernel
+  release = os.getenv("YOLO_MATCHLOCK_KERNEL_RELEASE")
+  if release == ""
+    release = KERNEL_RELEASE
+  end
+  baseurl = os.getenv("YOLO_MATCHLOCK_KERNEL_BASEURL")
+  if baseurl == ""
+    baseurl = KERNEL_BASEURL
+  end
+  asset = _kernel_asset()
+  home  = os.getenv("HOME")
+  dir   = "#{home}/.cache/yolo/kernels/#{release}"
+  path  = "#{dir}/#{asset}"
+  if os.file_exists(path)
+    return "file://#{path}"
+  end
+  url    = "#{baseurl}/#{release}/#{asset}"
+  sumurl = "#{url}.sha256"
+  tmp    = "#{path}.tmp.#{os.pid()}"
+  sumtmp = "#{tmp}.sha256"
+  _log("downloading container kernel #{release}/#{asset} (one-time)…")
+
+  # 1. kernel
+  dl = "mkdir -p " + _sh_squote(dir) +
+       " && curl -fSL --retry 3 -o " + _sh_squote(tmp) + " " + _sh_squote(url)
+  rc = try os.exec(dl) or "FAILED"
+  if rc == "FAILED" || !os.file_exists(tmp)
+    _kernel_dl_cleanup(tmp, sumtmp)
+    _err("failed to download the container kernel:")
+    _err("  #{url}")
+    _kernel_dl_hint()
+    os.exit(1)
+  end
+
+  # 2. checksum sidecar
+  dls = "curl -fSL --retry 3 -o " + _sh_squote(sumtmp) + " " + _sh_squote(sumurl)
+  rc2 = try os.exec(dls) or "FAILED"
+  if rc2 == "FAILED" || !os.file_exists(sumtmp)
+    _kernel_dl_cleanup(tmp, sumtmp)
+    _err("failed to download the container kernel checksum:")
+    _err("  #{sumurl}")
+    _kernel_dl_hint()
+    os.exit(1)
+  end
+
+  # 3. verify. The sidecar is in `sha256sum`/`shasum -a 256` format
+  # ("<hex>  <name>"); take the first field and compare against the computed
+  # digest (sha256sum on Linux, shasum on macOS). `set -e` + the final `test`
+  # make any failure — including a mismatch — a non-zero exit.
+  verify = "set -e\n" +
+    "expected=$(awk '{print $1; exit}' " + _sh_squote(sumtmp) + ")\n" +
+    "if command -v sha256sum >/dev/null 2>&1; then\n" +
+    "  actual=$(sha256sum " + _sh_squote(tmp) + " | awk '{print $1}')\n" +
+    "else\n" +
+    "  actual=$(shasum -a 256 " + _sh_squote(tmp) + " | awk '{print $1}')\n" +
+    "fi\n" +
+    "test -n \"$expected\"\n" +
+    "test \"$expected\" = \"$actual\"\n"
+  rcv = try os.exec("bash -c " + _sh_squote(verify)) or "FAILED"
+  if rcv == "FAILED"
+    _kernel_dl_cleanup(tmp, sumtmp)
+    _err("container kernel checksum mismatch — refusing a corrupted or tampered download.")
+    _err("  #{url}")
+    _err("  #{sumurl}")
+    os.exit(1)
+  end
+
+  # 4. install atomically, drop the sidecar temp.
+  rc3 = try os.exec("mv " + _sh_squote(tmp) + " " + _sh_squote(path)) or "FAILED"
+  _kernel_dl_cleanup("", sumtmp)
+  if rc3 == "FAILED" || !os.file_exists(path)
+    _kernel_dl_cleanup(tmp, sumtmp)
+    _err("failed to install the container kernel to #{path}")
+    os.exit(1)
+  end
+  return "file://#{path}"
+end
+
+# Best-effort removal of the kernel/sidecar temp files (either may be "").
+def _kernel_dl_cleanup(tmp, sumtmp)
+  if tmp != ""
+    try os.exec("rm -f " + _sh_squote(tmp)) or nil
+  end
+  if sumtmp != ""
+    try os.exec("rm -f " + _sh_squote(sumtmp)) or nil
+  end
+end
+
+def _kernel_dl_hint
+  _err("check your connection, or build one with scripts/build-kernels.sh and pass --matchlock-kernel.")
+end
+
 # ---------------- list_table ----------------
 # Returns a hash {vm-id => [status, image]} of every VM matchlock knows about.
 def _list_table_impl
@@ -115,6 +237,50 @@ def _start_impl(opts)
     end
   end
 
+  # matchlock-specific knobs, read straight from the environment (same pattern
+  # as the container backend's YOLO_CONTAINER_DNS). These are intentionally not
+  # part of the generic backend `opts` contract because they only make sense for
+  # matchlock's microVM model.
+
+  # YOLO_MATCHLOCK_PRIVILEGED — when truthy, pass matchlock --privileged, which
+  #   skips matchlock's in-guest sandbox (seccomp filter + capability drop +
+  #   no_new_privs). REQUIRED to run nested containers (Docker/Podman): the
+  #   sandbox otherwise EPERMs CLONE_NEWPID and the container runtime can't
+  #   create its PID namespace. Trades the extra in-guest hardening for the
+  #   ability to run a container engine; the VM boundary is still enforced.
+  privileged_arg = ""
+  priv = os.getenv("YOLO_MATCHLOCK_PRIVILEGED")
+  if priv == "1" || priv == "true" || priv == "yes"
+    privileged_arg = "--privileged"
+  end
+
+  # Guest kernel (matchlock --kernel):
+  #   - YOLO_MATCHLOCK_KERNEL set → use it verbatim (a "file:///abs/path" or an
+  #     OCI image reference); lets developers point at a locally-built kernel.
+  #   - else, in privileged mode → auto-provision the container-complete kernel
+  #     (needed for in-guest bridge networking). Downloaded from the release once
+  #     and cached; see _ensure_kernel. No end-user build step.
+  #   - else → matchlock's stock kernel.
+  kernel_arg = ""
+  kernel_ref = os.getenv("YOLO_MATCHLOCK_KERNEL")
+  if kernel_ref != ""
+    kernel_arg = "--kernel " + _sh_squote(kernel_ref)
+  elsif privileged_arg != ""
+    kernel_arg = "--kernel " + _sh_squote(_ensure_kernel())
+  end
+
+  # YOLO_MATCHLOCK_DISK — attach a raw block device (matchlock --disk). A single
+  #   spec, e.g. "/host/data.ext4:/var/lib/containers" or a named volume
+  #   "@containers:/var/lib/containers". Gives a container engine's graph driver
+  #   a real block-backed filesystem, sidestepping the overlay-on-overlayfs wall
+  #   on matchlock's overlay rootfs. Shell-quoted; host/guest paths must not
+  #   themselves contain the ',' matchlock uses for its ownership options.
+  disk_arg = ""
+  disk_spec = os.getenv("YOLO_MATCHLOCK_DISK")
+  if disk_spec != ""
+    disk_arg = "--disk " + _sh_squote(disk_spec)
+  end
+
   # --rm=false is required for `matchlock exec` to work afterwards: ephemeral
   # (`--rm=true`, the default in some matchlock paths) VMs do not create the
   # exec relay socket, and the next `matchlock exec <id>` errors out with
@@ -131,6 +297,9 @@ def _start_impl(opts)
       --cpus #{opts["cpus"]} \
       --memory #{opts["mem_mb"]} \
       --disk-size #{opts["disk_mb"]} \
+      #{kernel_arg} \
+      #{privileged_arg} \
+      #{disk_arg} \
       #{allow_arg} \
       #{user_arg} \
       #{publish_arg} \
